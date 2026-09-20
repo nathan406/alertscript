@@ -34,8 +34,11 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git status
+          
+          # Pull latest changes to avoid race conditions during 15m cron overlaps
+          git pull --rebase origin main || echo "No remote changes to pull"
+          
           git add active_trades.json
-          # Only commit and push if active_trades.json has actually changed
-          git diff --staged --quiet || git commit -m "Auto-update active trades state [skip ci]"
-          git push
+          
+          # Commit only if changes exist and push explicitly to main
+          git diff --staged --quiet || (git commit -m "Auto-update active trades state [skip ci]" && git push origin HEAD:main)
