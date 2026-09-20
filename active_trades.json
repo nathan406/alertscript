@@ -1,0 +1,11 @@
+{
+  "BTCUSD": {
+    "direction": "BUY",
+    "entry": 80346.6875,
+    "sl": 80335.5,
+    "tp1": 80357.875,
+    "tp2": 80369.0625,
+    "tp1_hit": false,
+    "sl_moved_to_be": false
+  }
+}
