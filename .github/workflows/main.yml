@@ -13,10 +13,18 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Run your script/application steps here
-      - name: Run Application Script
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
         run: |
-          echo "Executing code..."
+          python -m pip install --upgrade pip
+          pip install pandas yfinance requests numpy pytz
+
+      - name: Run Market Scanner Script
+        run: python script.py
 
       # Send Telegram Notification
       - name: Send Telegram Message
@@ -30,11 +38,11 @@ jobs:
             Repository: ${{ github.repository }}
             Commit: ${{ github.sha }}
 
-      # Send Discord Notification
+      # Send Discord Notification (Native cURL - No 3rd-party action needed)
       - name: Send Discord Message
-        uses: IlshatS/action-discord@master
         if: always()
-        with:
-          args: '🚀 Workflow run completed for repository: ${{ github.repository }}'
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d "{\"content\": \"🚀 GitHub Actions Workflow Finished for **${{ github.repository }}**!\"}" \
+               "${{ secrets.DISCORD_WEBHOOK_URL }}"
