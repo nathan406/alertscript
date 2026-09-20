@@ -53,11 +53,15 @@ jobs:
         run: python script.py
 
       # Step 5: Commit and push changes to active_trades.json back to GitHub
-      # This ensures trade state (like TP1 hit, SL moved to BE) is saved for the next 15-min run
+      # Updated to configure safe pulling/rebasing for automated cron execution
       - name: Commit Active Trades State
         run: |
           git config --global user.name "Trend Targets Bot"
           git config --global user.email "bot@zedsauce.fa"
+          
+          # Pull latest changes in case another run happened concurrently (prevents rejection)
+          git pull --rebase || echo "No remote changes to pull"
+          
           git add active_trades.json || true
           git diff --staged --quiet || (git commit -m "Update active trades state [skip ci]" && git push)
 
