@@ -1,87 +1,41 @@
-# ==============================================================================
-# GITHUB ACTIONS WORKFLOW: Market Scanner Pipeline
-# File Path: .github/workflows/main.yml
-# ==============================================================================
+name: Trend Targets Pro - Mandalorian Scanner
 
-name: Build, Run, and Notify
-
-# ------------------------------------------------------------------------------
-# TRIGGERS: Controls when this automation pipeline runs
-# ------------------------------------------------------------------------------
 on:
-  # 1. Automated Cron Schedule: Runs every 15 minutes, 24/7
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/15 * * * *' # Runs every 15 minutes
+  workflow_dispatch: # Allows manual trigger from the Actions tab
 
-  # 2. Code Push Trigger: Runs whenever you push code changes to the 'main' branch
-  push:
-    branches: [ main ]
-
-  # 3. Manual Trigger: Allows you to manually click "Run workflow" in GitHub UI
-  workflow_dispatch:
-
-# ------------------------------------------------------------------------------
-# JOBS & STEPS: Execution pipeline running on a virtual Linux machine
-# ------------------------------------------------------------------------------
 jobs:
-  pipeline:
-    runs-on: ubuntu-latest # Uses the latest Ubuntu Linux virtual runner
-
-    # Grants write permissions to the repository so the bot can commit active_trades.json
+  run-scanner:
+    runs-on: ubuntu-latest
+    
+    # REQUIRED: Grants the workflow permission to write/push code changes back to the repo
     permissions:
       contents: write
 
     steps:
-      # Step 1: Clone/checkout your repository code onto the runner machine
-      - name: Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Install and setup Python 3.11 runtime environment
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      # Step 3: Install all Python libraries required by script.py
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas yfinance requests numpy pytz
+          pip install requests pytz numpy pandas yfinance
 
-      # Step 4: Execute the market scanner python script
-      - name: Run Market Scanner Script
+      - name: Run trading scanner
         run: python script.py
 
-      # Step 5: Commit and push changes to active_trades.json back to GitHub
-      # Updated to configure safe pulling/rebasing for automated cron execution
-      - name: Commit Active Trades State
+      - name: Commit and push trade state updates
         run: |
-          git config --global user.name "Trend Targets Bot"
-          git config --global user.email "bot@zedsauce.fa"
-          
-          # Pull latest changes in case another run happened concurrently (prevents rejection)
-          git pull --rebase || echo "No remote changes to pull"
-          
-          git add active_trades.json || true
-          git diff --staged --quiet || (git commit -m "Update active trades state [skip ci]" && git push)
-
-      # Step 6: Send execution summary to Telegram using official GitHub secret tokens
-      - name: Send Telegram Message
-        uses: appleboy/telegram-action@v1
-        if: always() # Runs regardless of whether earlier steps succeeded or failed
-        with:
-          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          message: |
-            🚀 GitHub Actions Workflow Finished!
-            Repository: ${{ github.repository }}
-            Commit: ${{ github.sha }}
-
-      # Step 7: Send execution summary to Discord via direct API cURL request
-      - name: Send Discord Message
-        if: always() # Runs regardless of whether earlier steps succeeded or failed
-        run: |
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d "{\"content\": \"🚀 GitHub Actions Workflow Finished for **${{ github.repository }}**!\"}" \
-               "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git status
+          git add active_trades.json
+          # Only commit and push if active_trades.json has actually changed
+          git diff --staged --quiet || git commit -m "Auto-update active trades state [skip ci]"
+          git push
