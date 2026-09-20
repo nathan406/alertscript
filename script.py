@@ -1,7 +1,7 @@
 # ==============================================================================
-# TREND TARGETS PRO — MANDALORIAN WARRIOR EDITION (1M TEST MODE)
+# TREND TARGETS PRO — MANDALORIAN WARRIOR EDITION
 # ==============================================================================
-# Description: Temporary 1-Minute Live Testing Script for BTCUSD
+# Description: Live Continuous Scanner & Notification Engine for TradingView Setups
 # Theme: Mandalorian / Warrior Creed
 # Core Rule: "This is the way." in every alert message.
 # ==============================================================================
@@ -9,6 +9,7 @@
 import os
 import json
 import math
+import time
 import random
 import requests
 from datetime import datetime
@@ -20,25 +21,29 @@ import yfinance as yf
 # ==============================================================================
 # TEST MODE CONFIGURATION
 # ==============================================================================
-# Set TEST_MODE = True to bypass session limits and test on 1m BTC candles.
-# Set TEST_MODE = False when returning to live 15m trading production.
+# Set TEST_MODE = True  -> 1m Timeframe, ALL setups accepted, continuous 10s loop, sessions bypassed.
+# Set TEST_MODE = False -> 15m Timeframe, Medium/High prob setups, 60s loop, strict session filters.
 TEST_MODE = True
 
 # Webhooks and Bot tokens for dispatching warrior dispatches
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1550985326770528266/9oOJm2yH7o7RLaQBBjeH7AW9_Q31tAKBu2ae8w3dk1GIUuFY0NRtlm3AyLv8RQb2vouZ"
 TELEGRAM_BOT_TOKEN = "8946173658:AAGw-lqdxlgmraOcQyJbyHTlCL7P1dxWbW4"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"  # Replace with your numerical Chat ID
+TELEGRAM_CHAT_ID = "5754432239"  # Replace with your numerical Chat ID (e.g., "123456789")
 
 STATE_FILE = "active_trades.json"
 ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 
-# Symbol mapping for testing: Only BTCUSD on 24/7 crypto market
+# Symbol mapping: (yfinance ticker, session constraint)
 SYMBOLS = {
-    "BTCUSD": ("BTC-USD", "NEW_YORK")
+    "BTCUSD": ("BTC-USD", "24/7"),
+    # Add additional pairs for 15M Live Production:
+    # "EURUSD": ("EURUSD=X", "NEW_YORK"),
+    # "GBPUSD": ("GBPUSD=X", "NEW_YORK"),
+    # "XAUUSD": ("GC=F", "NEW_YORK"),
 }
 
 # ==============================================================================
-# MANDALORIAN MESSAGES (25+ Variations Each — "This is the way.")
+# MANDALORIAN MESSAGES
 # ==============================================================================
 
 TP1_MESSAGES = [
@@ -74,10 +79,10 @@ BE_HIT_MESSAGES = [
 def is_in_session(session_type):
     """
     Checks if current Zambia / Central Africa Time (CAT) falls within active trading sessions.
-    Bypassed if TEST_MODE = True.
+    Bypassed if TEST_MODE = True or session_type is 24/7.
     """
-    if TEST_MODE:
-        return True  # Always active during testing
+    if TEST_MODE or session_type == "24/7":
+        return True
 
     now_cat = datetime.now(ZAMBIA_TZ)
     time_min = now_cat.hour * 60 + now_cat.minute
@@ -91,21 +96,21 @@ def is_in_session(session_type):
 # ==============================================================================
 # INDICATOR ENGINE
 # ==============================================================================
-def calculate_indicators(df_1m, df_1h):
+def calculate_indicators(df_lower, df_1h):
     """
     Calculates HTF EMA 50, Supertrend (10, 3.0), ADX (14), and Candle Body Ratio.
     """
     df_1h['HTF_EMA'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
     
-    df_1m = pd.merge_asof(
-        df_1m.sort_index(),
+    df_lower = pd.merge_asof(
+        df_lower.sort_index(),
         df_1h[['HTF_EMA']].sort_index(),
         left_index=True,
         right_index=True,
         direction='backward'
     )
 
-    high, low, close, open_p = df_1m['High'], df_1m['Low'], df_1m['Close'], df_1m['Open']
+    high, low, close, open_p = df_lower['High'], df_lower['Low'], df_lower['Close'], df_lower['Open']
 
     # Supertrend (10, 3.0)
     tr0 = high - low
@@ -120,9 +125,9 @@ def calculate_indicators(df_1m, df_1h):
 
     final_ub = basic_ub.copy()
     final_lb = basic_lb.copy()
-    st_trend = pd.Series(1, index=df_1m.index)
+    st_trend = pd.Series(1, index=df_lower.index)
 
-    for i in range(1, len(df_1m)):
+    for i in range(1, len(df_lower)):
         final_ub.iloc[i] = basic_ub.iloc[i] if (basic_ub.iloc[i] < final_ub.iloc[i-1] or close.iloc[i-1] > final_ub.iloc[i-1]) else final_ub.iloc[i-1]
         final_lb.iloc[i] = basic_lb.iloc[i] if (basic_lb.iloc[i] > final_lb.iloc[i-1] or close.iloc[i-1] < final_lb.iloc[i-1]) else final_lb.iloc[i-1]
 
@@ -131,7 +136,7 @@ def calculate_indicators(df_1m, df_1h):
         else:
             st_trend.iloc[i] = 1 if close.iloc[i] > final_ub.iloc[i] else -1
 
-    df_1m['ST_Trend'] = st_trend
+    df_lower['ST_Trend'] = st_trend
 
     # ADX (14)
     up_move = high - high.shift(1)
@@ -140,16 +145,16 @@ def calculate_indicators(df_1m, df_1h):
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
     atr14 = tr.ewm(alpha=1/14, adjust=False).mean()
-    plus_di = 100 * (pd.Series(plus_dm, index=df_1m.index).ewm(alpha=1/14, adjust=False).mean() / atr14)
-    minus_di = 100 * (pd.Series(minus_dm, index=df_1m.index).ewm(alpha=1/14, adjust=False).mean() / atr14)
+    plus_di = 100 * (pd.Series(plus_dm, index=df_lower.index).ewm(alpha=1/14, adjust=False).mean() / atr14)
+    minus_di = 100 * (pd.Series(minus_dm, index=df_lower.index).ewm(alpha=1/14, adjust=False).mean() / atr14)
 
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    df_1m['ADX'] = dx.ewm(alpha=1/14, adjust=False).mean()
+    df_lower['ADX'] = dx.ewm(alpha=1/14, adjust=False).mean()
 
     # Candle Body Ratio
-    df_1m['BodyRatio'] = (close - open_p).abs() / np.maximum(high - low, 0.0001)
+    df_lower['BodyRatio'] = (close - open_p).abs() / np.maximum(high - low, 0.0001)
 
-    return df_1m
+    return df_lower
 
 # ==============================================================================
 # DISPATCH MESSAGES
@@ -170,18 +175,18 @@ def send_notification(title, message_body, color_code=3447003):
             }]
         }
         try:
-            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
         except Exception as e:
             print(f"Discord dispatch error: {e}")
 
     # Telegram Dispatch
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and TELEGRAM_CHAT_ID != "YOUR_TELEGRAM_CHAT_ID":
         full_msg = f"*{title}*\n\n{message_body}\n\n_Trend Targets Pro • Warrior Creed_"
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 data={"chat_id": TELEGRAM_CHAT_ID, "text": full_msg, "parse_mode": "Markdown"},
-                timeout=10
+                timeout=5
             )
         except Exception as e:
             print(f"Telegram dispatch error: {e}")
@@ -208,7 +213,6 @@ def save_state(state):
 def run_scanner():
     state = load_state()
 
-    # Determine timeframe interval based on TEST_MODE
     tf_interval = "1m" if TEST_MODE else "15m"
     tf_period = "1d" if TEST_MODE else "5d"
 
@@ -227,23 +231,40 @@ def run_scanner():
 
         df = calculate_indicators(df_lower, df_1h)
 
-        latest_bar = df.iloc[-2]  # Last closed candle
+        # Inspect latest active bar (iloc[-1]) and previous bar (iloc[-2])
+        latest_bar = df.iloc[-1]
         close_p = float(latest_bar['Close'])
-        high_p = float(latest_bar['High'])
-        low_p = float(latest_bar['Low'])
+        high_p  = float(latest_bar['High'])
+        low_p   = float(latest_bar['Low'])
+
+        curr_st = df['ST_Trend'].iloc[-1]
+        prev_st = df['ST_Trend'].iloc[-2]
+
+        buy_flip  = (prev_st == -1) and (curr_st == 1)
+        sell_flip = (prev_st == 1)  and (curr_st == -1)
 
         # ----------------------------------------------------------------------
-        # 1. EVALUATE ACTIVE TRADES (TP1, TP2, SL, BE)
+        # 1. EVALUATE ACTIVE TRADES (TP1, TP2, SL, BE, REVERSE EXIT)
         # ----------------------------------------------------------------------
         if name in state:
             trade = state[name]
             direction = trade['direction']
             entry = trade['entry']
-            sl = trade['sl']
-            tp1 = trade['tp1']
-            tp2 = trade['tp2']
+            sl    = trade['sl']
+            tp1   = trade['tp1']
+            tp2   = trade['tp2']
 
-            if direction == "BUY":
+            # If an opposite trend flip occurs, close open trade instantly
+            if (direction == "BUY" and sell_flip) or (direction == "SELL" and buy_flip):
+                send_notification(
+                    f"🔄 TRADE CLOSED ON REVERSE SIGNAL — {name}",
+                    f"Trend flipped to opposite side. Active `{direction}` trade closed at `{close_p:.2f}`. This is the way.",
+                    color_code=1752220
+                )
+                del state[name]
+                save_state(state)
+
+            elif direction == "BUY":
                 if not trade['tp1_hit'] and high_p >= tp1:
                     trade['tp1_hit'] = True
                     trade['sl_moved_to_be'] = True
@@ -325,34 +346,41 @@ def run_scanner():
         if not is_in_session(session_type):
             continue
 
-        curr_st, prev_st = df['ST_Trend'].iloc[-2], df['ST_Trend'].iloc[-3]
+        # Skip if no valid trend flip occurred or trade is already open
+        if not (buy_flip or sell_flip) or name in state:
+            continue
+
         htf_ema = float(latest_bar['HTF_EMA'])
         adx_val = float(latest_bar['ADX'])
         body_ratio = float(latest_bar['BodyRatio'])
 
-        buy_flip = (prev_st == -1) and (curr_st == 1)
-        sell_flip = (prev_st == 1) and (curr_st == -1)
+        # Production Tier Filtering (Applied when TEST_MODE = False)
+        if not TEST_MODE:
+            # Medium/High Probability setup validation
+            is_htf_aligned = (close_p > htf_ema) if buy_flip else (close_p < htf_ema)
+            is_strong_trend = (adx_val >= 20.0) and (body_ratio >= 0.40)
+            
+            if not (is_htf_aligned and is_strong_trend):
+                continue  # Skip low-probability setups in live production mode
 
-        # In TEST_MODE, if no flip occurred, evaluate current trend direction to force a test alert
-        if TEST_MODE and not (buy_flip or sell_flip):
-            if curr_st == 1:
-                buy_flip = True
-            else:
-                sell_flip = True
+            tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if adx_val >= 25 else "MEDIUM PROBABILITY SETUP ⭐⭐"
+        else:
+            tier_txt = "1M TEST RUN — MANDALORIAN SIGNAL ⭐⭐⭐"
 
-        if not (buy_flip or sell_flip):
-            continue
-
-        tier_txt = "TEST RUN — MANDALORIAN SIGNAL ⭐⭐⭐"
         direction = "BUY" if buy_flip else "SELL"
 
-        lookback_bars = df.iloc[-5:-2]
+        # Calculate Swing High/Low for Stop Loss
+        lookback_bars = df.iloc[-6:-1]
         sl_px = float(lookback_bars['Low'].min()) if buy_flip else float(lookback_bars['High'].max())
 
         risk = abs(close_p - sl_px)
+        if risk == 0:
+            risk = close_p * 0.001  # Fallback 0.1% buffer
+
         tp1_px = close_p + risk if buy_flip else close_p - risk
         tp2_px = close_p + (risk * 2.0) if buy_flip else close_p - (risk * 2.0)
 
+        # Save trade state
         state[name] = {
             "direction": direction,
             "entry": close_p,
@@ -368,10 +396,10 @@ def run_scanner():
         color = 5763719 if direction == "BUY" else 15548997
 
         msg_body = (
-            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} (1M TEST)*\n"
+            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} ({tf_interval.upper()})*\n"
             f"• *Tier:* `{tier_txt}`\n\n"
             f"• *Entry Price:* `{close_p:.2f}`\n"
-            f"• *Stop Loss (Scalp):* `{sl_px:.2f}`\n"
+            f"• *Stop Loss:* `{sl_px:.2f}`\n"
             f"• *TP1 (1:1 R/R):* `{tp1_px:.2f}`\n"
             f"• *TP2 (1:2 R/R):* `{tp2_px:.2f}`\n\n"
             f"• *ADX Strength:* `{adx_val:.1f}` | *Candle Body:* `{body_ratio*100:.1f}%`\n\n"
@@ -379,5 +407,30 @@ def run_scanner():
         )
         send_notification(f"🚨 TREND TARGETS PRO — {name}", msg_body, color_code=color)
 
+# ==============================================================================
+# CONTINUOUS EXECUTION LOOP
+# ==============================================================================
 if __name__ == "__main__":
-    run_scanner()
+    print("=" * 60)
+    print(" 🚀 TREND TARGETS PRO ENGINE INITIALIZED")
+    print(f" • Mode: {'1M TEST MODE (All Setups Active)' if TEST_MODE else '15M PRODUCTION MODE'}")
+    print(" • Continuous Scanner Running... Press Ctrl+C to stop.")
+    print("=" * 60)
+
+    # Clean stale state file on initial test startup if needed
+    if TEST_MODE and os.path.exists(STATE_FILE):
+        try:
+            os.remove(STATE_FILE)
+            print("Notice: Cleaned active_trades.json for fresh 1m test run.")
+        except Exception:
+            pass
+
+    while True:
+        try:
+            run_scanner()
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanner Exception: {e}")
+
+        # Scan every 10s in 1m TEST_MODE; every 60s in 15m LIVE mode
+        sleep_interval = 10 if TEST_MODE else 60
+        time.sleep(sleep_interval)
