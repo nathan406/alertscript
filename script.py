@@ -1,5 +1,5 @@
 # ==============================================================================
-# TREND TARGETS PRO — MANDALORIAN WARRIOR EDITION
+# TREND TARGETS PRO — MANDALORIAN WARRIOR EDITION (PRODUCTION MODE)
 # ==============================================================================
 # Description: Live Continuous Scanner & Notification Engine for TradingView Setups
 # Theme: Mandalorian / Warrior Creed
@@ -19,27 +19,25 @@ import pandas as pd
 import yfinance as yf
 
 # ==============================================================================
-# TEST MODE CONFIGURATION
+# PRODUCTION MODE CONFIGURATION
 # ==============================================================================
-# Set TEST_MODE = True  -> 1m Timeframe, ALL setups accepted, continuous 10s loop, sessions bypassed.
-# Set TEST_MODE = False -> 15m Timeframe, Medium/High prob setups, 60s loop, strict session filters.
-TEST_MODE = True
+# Set TEST_MODE = False -> 15m Timeframe, Medium/High prob setups, strict session filters.
+TEST_MODE = False
 
 # Webhooks and Bot tokens for dispatching warrior dispatches
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1550985326770528266/9oOJm2yH7o7RLaQBBjeH7AW9_Q31tAKBu2ae8w3dk1GIUuFY0NRtlm3AyLv8RQb2vouZ"
 TELEGRAM_BOT_TOKEN = "8946173658:AAGw-lqdxlgmraOcQyJbyHTlCL7P1dxWbW4"
-TELEGRAM_CHAT_ID = "5754432239"  # Replace with your numerical Chat ID (e.g., "123456789")
+TELEGRAM_CHAT_ID = "5754432239"
 
 STATE_FILE = "active_trades.json"
 ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 
 # Symbol mapping: (yfinance ticker, session constraint)
 SYMBOLS = {
-    "BTCUSD": ("BTC-USD", "24/7"),
-    # Add additional pairs for 15M Live Production:
-    # "EURUSD": ("EURUSD=X", "NEW_YORK"),
-    # "GBPUSD": ("GBPUSD=X", "NEW_YORK"),
-    # "XAUUSD": ("GC=F", "NEW_YORK"),
+    "BTCUSD": ("BTC-USD", "NEW_YORK"),
+    "NDX":    ("NQ=F", "NEW_YORK"),
+    "GER40":  ("^GDAXI", "NEW_YORK"),
+    "XAUUSD": ("GC=F", "ASIAN"),
 }
 
 # ==============================================================================
@@ -74,12 +72,13 @@ BE_HIT_MESSAGES = [
 ]
 
 # ==============================================================================
-# SESSION FILTERING (ZAMBIA / CAT TIME)
+# SESSION FILTERING (CAT TIME: 02:00 - 07:45 ASIAN | 15:30 - 21:45 NEW YORK)
 # ==============================================================================
 def is_in_session(session_type):
     """
-    Checks if current Zambia / Central Africa Time (CAT) falls within active trading sessions.
-    Bypassed if TEST_MODE = True or session_type is 24/7.
+    Checks if current Central Africa Time (CAT) falls within designated market sessions.
+    - ASIAN: 02:00 to 07:45 CAT (120 to 465 minutes)
+    - NEW_YORK: 15:30 to 21:45 CAT (930 to 1305 minutes)
     """
     if TEST_MODE or session_type == "24/7":
         return True
@@ -88,7 +87,7 @@ def is_in_session(session_type):
     time_min = now_cat.hour * 60 + now_cat.minute
 
     if session_type == "ASIAN":
-        return 120 <= time_min <= 462
+        return 120 <= time_min <= 465
     elif session_type == "NEW_YORK":
         return 930 <= time_min <= 1305
     return False
@@ -97,9 +96,6 @@ def is_in_session(session_type):
 # INDICATOR ENGINE
 # ==============================================================================
 def calculate_indicators(df_lower, df_1h):
-    """
-    Calculates HTF EMA 50, Supertrend (10, 3.0), ADX (14), and Candle Body Ratio.
-    """
     df_1h['HTF_EMA'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
     
     df_lower = pd.merge_asof(
@@ -160,9 +156,6 @@ def calculate_indicators(df_lower, df_1h):
 # DISPATCH MESSAGES
 # ==============================================================================
 def send_notification(title, message_body, color_code=3447003):
-    """
-    Sends Mandalorian-themed alert embeds to Discord Webhook & Telegram Bot.
-    """
     # Discord Dispatch
     if DISCORD_WEBHOOK_URL:
         payload = {
@@ -180,7 +173,7 @@ def send_notification(title, message_body, color_code=3447003):
             print(f"Discord dispatch error: {e}")
 
     # Telegram Dispatch
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and TELEGRAM_CHAT_ID != "YOUR_TELEGRAM_CHAT_ID":
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         full_msg = f"*{title}*\n\n{message_body}\n\n_Trend Targets Pro • Warrior Creed_"
         try:
             requests.post(
@@ -231,7 +224,6 @@ def run_scanner():
 
         df = calculate_indicators(df_lower, df_1h)
 
-        # Inspect latest active bar (iloc[-1]) and previous bar (iloc[-2])
         latest_bar = df.iloc[-1]
         close_p = float(latest_bar['Close'])
         high_p  = float(latest_bar['High'])
@@ -254,7 +246,6 @@ def run_scanner():
             tp1   = trade['tp1']
             tp2   = trade['tp2']
 
-            # If an opposite trend flip occurs, close open trade instantly
             if (direction == "BUY" and sell_flip) or (direction == "SELL" and buy_flip):
                 send_notification(
                     f"🔄 TRADE CLOSED ON REVERSE SIGNAL — {name}",
@@ -346,7 +337,6 @@ def run_scanner():
         if not is_in_session(session_type):
             continue
 
-        # Skip if no valid trend flip occurred or trade is already open
         if not (buy_flip or sell_flip) or name in state:
             continue
 
@@ -354,33 +344,29 @@ def run_scanner():
         adx_val = float(latest_bar['ADX'])
         body_ratio = float(latest_bar['BodyRatio'])
 
-        # Production Tier Filtering (Applied when TEST_MODE = False)
         if not TEST_MODE:
-            # Medium/High Probability setup validation
             is_htf_aligned = (close_p > htf_ema) if buy_flip else (close_p < htf_ema)
             is_strong_trend = (adx_val >= 20.0) and (body_ratio >= 0.40)
             
             if not (is_htf_aligned and is_strong_trend):
-                continue  # Skip low-probability setups in live production mode
+                continue
 
             tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if adx_val >= 25 else "MEDIUM PROBABILITY SETUP ⭐⭐"
         else:
-            tier_txt = "1M TEST RUN — MANDALORIAN SIGNAL ⭐⭐⭐"
+            tier_txt = "TEST RUN SIGNAL ⭐⭐⭐"
 
         direction = "BUY" if buy_flip else "SELL"
 
-        # Calculate Swing High/Low for Stop Loss
         lookback_bars = df.iloc[-6:-1]
         sl_px = float(lookback_bars['Low'].min()) if buy_flip else float(lookback_bars['High'].max())
 
         risk = abs(close_p - sl_px)
         if risk == 0:
-            risk = close_p * 0.001  # Fallback 0.1% buffer
+            risk = close_p * 0.001
 
         tp1_px = close_p + risk if buy_flip else close_p - risk
         tp2_px = close_p + (risk * 2.0) if buy_flip else close_p - (risk * 2.0)
 
-        # Save trade state
         state[name] = {
             "direction": direction,
             "entry": close_p,
@@ -408,16 +394,9 @@ def run_scanner():
         send_notification(f"🚨 TREND TARGETS PRO — {name}", msg_body, color_code=color)
 
 # ==============================================================================
-# CONTINUOUS EXECUTION LOOP
+# MAIN BATCH EXECUTION
 # ==============================================================================
 if __name__ == "__main__":
-    # Single run execution for GitHub Actions
-    if TEST_MODE and os.path.exists(STATE_FILE):
-        try:
-            os.remove(STATE_FILE)
-        except Exception:
-            pass
-
     try:
         run_scanner()
     except Exception as e:
