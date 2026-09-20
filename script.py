@@ -1,3 +1,11 @@
+# ==============================================================================
+# TREND TARGETS PRO — MANDALORIAN WARRIOR EDITION
+# ==============================================================================
+# Description: 15-Minute Market Scanner & Automated Trade Manager
+# Theme: Mandalorian / Warrior Creed — Honorable, Brave, Encouraging
+# Core Rule: "This is the way." in every alert message.
+# ==============================================================================
+
 import os
 import json
 import math
@@ -12,148 +20,166 @@ import yfinance as yf
 # ==============================================================================
 # CONFIGURATION & CREDENTIALS
 # ==============================================================================
+# Webhooks and Bot tokens for dispatching warrior dispatches
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1550985326770528266/9oOJm2yH7o7RLaQBBjeH7AW9_Q31tAKBu2ae8w3dk1GIUuFY0NRtlm3AyLv8RQb2vouZ"
 TELEGRAM_BOT_TOKEN = "8946173658:AAGw-lqdxlgmraOcQyJbyHTlCL7P1dxWbW4"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"  # Replace with your chat ID
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"  # Replace with your numerical Chat ID
 
 STATE_FILE = "active_trades.json"
 ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 
 # Symbol mapping: Name -> (Yahoo Ticker, Session Type)
 SYMBOLS = {
-    "XAUUSD": ("GC=F", "ASIAN"),      # TVC / Futures Gold equivalent
-    "USTEC":  ("NQ=F", "NEW_YORK"),   # IC Markets Nasdaq equivalent
-    "GER40":  ("^GDAXI", "NEW_YORK"), # Forex.com DAX equivalent
-    "BTCUSD": ("BTC-USD", "NEW_YORK") # Bitstamp BTC equivalent
+    "XAUUSD": ("GC=F", "ASIAN"),      # Gold Futures (Asian Session)
+    "USTEC":  ("NQ=F", "NEW_YORK"),   # Nasdaq Futures (New York Session)
+    "GER40":  ("^GDAXI", "NEW_YORK"), # DAX Index (New York Session)
+    "BTCUSD": ("BTC-USD", "NEW_YORK") # Bitcoin (New York Session)
 }
 
 # ==============================================================================
-# DYNAMIC MESSAGES (25+ Variations Each)
+# MANDALORIAN MESSAGES (25+ Variations Each — "This is the way.")
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# TP1 HIT: Partials banked, move Stop Loss to Entry (Break Even)
+# ------------------------------------------------------------------------------
 TP1_MESSAGES = [
-    "A PIP A DAY KEEPS POVERTY AWAY! 🎯 TP1 smashed! Lock in partials and move SL to BREAK EVEN!",
-    "TP1 secured! 💰 Risk removed from the table. Move that Stop Loss to Entry now!",
-    "BAM! TP1 hit like a freight train! 🚀 Move SL to Break Even and let the rest run!",
-    "Pure institutional precision! 🎯 TP1 achieved. SL adjusted to Break Even. Free trade activated!",
-    "ZedSauce FA rules followed to the letter! TP1 banked. Protect the account — SL to BE!",
-    "Money in the bag! 💼 TP1 hit. Move your stop loss to break even immediately!",
-    "Executing like a sniper! 🎯 TP1 hit. SL to BE. We ride risk-free now!",
-    "Target 1 reached! 🚀 Partial profits banked. Move SL to break even!",
-    "The 15M chart delivers! 🎯 TP1 hit. SL shifted to entry level!",
-    "Easy work! TP1 hit cleanly. 💰 Move SL to Break Even and sit back!",
-    "Chart read like a book! 📖 TP1 secured. Adjust SL to Break Even!",
-    "Zero emotion, pure execution! 🎯 TP1 hit. SL to BE time!",
-    "TP1 tagged! 🎯 Half the risk off, all the confidence intact. SL to Break Even!",
-    "Pips collected! 💵 TP1 reached. Shift SL to Break Even!",
-    "Green on the screen! 🟢 TP1 hit. SL moved to Break Even — zero risk mode!",
-    "Flawless execution! 🎯 TP1 bagged. Move SL to entry price!",
-    "Market respects the setup! 🎯 TP1 hit. Move SL to Break Even!",
-    "Pockets heavier! 💰 TP1 hit. Move SL to BE and protect your gain!",
-    "Boom! TP1 smashed. 🚀 Shift SL to Break Even right now!",
-    "Precision entry = Easy TP1! 🎯 Shift SL to Break Even and stay disciplined!",
-    "TP1 collected with zero stress! ☕ SL to Break Even!",
-    "Rules obeyed, pips secured! 🎯 TP1 reached. SL moved to BE!",
-    "Target 1 crushed! 💥 SL to Break Even. Let runner go to TP2!",
-    "Structure delivered! 🎯 TP1 hit. Lock in BE status!",
-    "Another clean hit! 🎯 TP1 in the books. Move SL to Break Even!"
+    "Target 1 vanquished! 🎯 Partials stored in the foundry and armor reinforced at Break Even. This is the way.",
+    "First blow struck with precision! ⚔️ TP1 claimed, risk eliminated. Move SL to Break Even. This is the way.",
+    "The clan claims its first bounty! 💰 TP1 hit, SL moved to entry. We fight risk-free now. This is the way.",
+    "BAM! TP1 struck like a Mandalorian spear! 🚀 Move SL to Break Even and let the rest run. This is the way.",
+    "Beskar-grade execution! 🎯 TP1 achieved. SL adjusted to Break Even. Free trade activated. This is the way.",
+    "Rule of the Creed followed to the letter! TP1 banked. Protect the treasury — SL to BE! This is the way.",
+    "Bounty partially collected! 💼 TP1 hit. Shift your stop loss to break even immediately! This is the way.",
+    "Executing like a true warrior! 🎯 TP1 hit. SL to BE. We march forward without fear! This is the way.",
+    "Target 1 reached on the battleground! 🚀 Partial spoils secured. Move SL to break even! This is the way.",
+    "The 15M chart yields to our strength! 🎯 TP1 hit. SL shifted to entry level! This is the way.",
+    "Flawless combat maneuver! TP1 hit cleanly. 💰 Move SL to Break Even and hold your ground! This is the way.",
+    "The strategy read the market like an ancient script! 📜 TP1 secured. Adjust SL to Break Even! This is the way.",
+    "Zero emotion, pure warrior discipline! 🎯 TP1 hit. Move SL to Break Even now! This is the way.",
+    "TP1 tagged! 🎯 Half the risk off the table, total confidence intact. SL to Break Even! This is the way.",
+    "Spoils collected! 💵 TP1 reached. Shift SL to Break Even and prepare for full victory! This is the way.",
+    "Green shines on our armor! 🟢 TP1 hit. SL moved to Break Even — zero risk mode engaged! This is the way.",
+    "A noble strike! 🎯 TP1 bagged. Move SL to entry price and stay vigilant! This is the way.",
+    "The market respects the warrior's code! 🎯 TP1 hit. Move SL to Break Even! This is the way.",
+    "Treasury growing heavier! 💰 TP1 hit. Move SL to BE and defend your gain! This is the way.",
+    "BOOM! TP1 smashed with power! 🚀 Shift SL to Break Even right now! This is the way.",
+    "Precision entry equals victory! 🎯 Shift SL to Break Even and remain relentless! This is the way.",
+    "TP1 collected with complete composure! 🛡️ SL to Break Even! This is the way.",
+    "Code obeyed, spoils secured! 🎯 TP1 reached. SL moved to BE! This is the way.",
+    "Target 1 crushed in the heat of battle! 💥 SL to Break Even. Let the runner pursue TP2! This is the way.",
+    "Market structure delivered our rightful prize! 🎯 TP1 hit. Lock in BE status! This is the way.",
+    "Another honorable victory! 🎯 TP1 in the books. Move SL to Break Even! This is the way."
 ]
 
+# ------------------------------------------------------------------------------
+# TP2 HIT: Full target hit (1:2 Risk/Reward) — Total Victory
+# ------------------------------------------------------------------------------
 TP2_MESSAGES = [
-    "FULL TP2 SMASHED! 🚀🔥 1:2 R/R completely liquidated! 'A PIP A DAY KEEPS POVERTY AWAY!'",
-    "JACKPOT! 💰 TP2 hit! Full target reached with absolute perfection!",
-    "MAXIMUM REWARD UNLOCKED! 🎯 TP2 crushed! Time to count the profits!",
-    "VICTORY! 🏆 Full TP2 hit! Absolute masterclass from Trend Targets Pro!",
-    "BOOM! 💥 TP2 hit like a clockwork! Bank the full profit and celebrate!",
-    "Target 2 DESTROYED! 🚀 Pure institutional price action delivered!",
-    "1:2 Risk/Reward completed! 💰 Full TP2 bagged! Great trading team!",
-    "TP2 SMASHED! 🚀 Leave no pips behind! What a magnificent trade!",
-    "CHEERS TO THE PIP COLLECTORS! 🥂 TP2 hit in full!",
-    "Full expansion complete! 📈 TP2 hit. Close position and enjoy the weekend energy!",
-    "Clean sweep! 🧹 TP2 hit! That is how we trade at ZedSauce Forex Academy!",
-    "TP2 Obliterated! 💥 Maximum pips extracted from the market!",
-    "TP2 reached! 🚀 Trend Targets Pro does it again. Flawless setup!",
-    "FULL WIN! 🏆 1:2 R/R secured! High/Medium probability setups never lie!",
-    "BOOM SHAKALAKA! 💰 TP2 hit! Take the money and run!",
-    "Absolute perfection! 🎯 TP2 reached. Pure algorithmic execution!",
-    "Pips galore! 💵 TP2 hit in full. Capital grown like a champ!",
-    "TP2 Tagged and Bagged! 💼 Maximum reward achieved!",
-    "Full Target hit! 🎯 Zero drawdown, pure expansion to TP2!",
-    "WE COOKED! 👨‍🍳 TP2 hit in full! Excellent rule adherence!",
-    "TP2 complete! 🚀 Stand up and applaud this trade execution!",
-    "1:2 R/R delivered on a silver platter! 🥈 TP2 hit!",
-    "Account growing, rules holding! 📈 TP2 fully hit!",
-    "TP2 Cleared! 🎯 Another successful campaign on the 15M timeframe!",
-    "Pips delivered to the vault! 🏦 TP2 completely hit!"
+    "FULL CONQUEST ACHIEVED! 🚀🔥 1:2 R/R completely liquidated! Maximum bounty claimed! This is the way.",
+    "VICTORY IN THE ARENA! 💰 TP2 hit! Full target reached with absolute warrior perfection! This is the way.",
+    "MAXIMUM REWARD UNLOCKED! 🎯 TP2 crushed! Time to count the spoils of war! This is the way.",
+    "TRIUMPH FOR THE CLAN! 🏆 Full TP2 hit! Absolute masterclass from the Creed! This is the way.",
+    "BOOM! 💥 TP2 hit like clockwork! Bank the full bounty and celebrate! This is the way.",
+    "Target 2 DESTROYED! 🚀 Pure institutional force delivered! This is the way.",
+    "1:2 Risk/Reward conquered! 💰 Full TP2 bagged! Stand tall, warriors! This is the way.",
+    "TP2 SMASHED! 🚀 Leave no pips behind! What a magnificent campaign! This is the way.",
+    "HAIL THE BOUNTY HUNTERS! 🥂 TP2 hit in full! Glory to the disciplined! This is the way.",
+    "Full market expansion complete! 📈 TP2 hit. Close position and honor the win! This is the way.",
+    "Clean sweep of the battlefield! 🧹 TP2 hit! That is how we conquer the markets! This is the way.",
+    "TP2 Obliterated! 💥 Maximum spoils extracted from the market! This is the way.",
+    "TP2 reached! 🚀 Trend Targets Pro delivers total victory once again! This is the way.",
+    "TOTAL VICTORY! 🏆 1:2 R/R secured! High & Medium probability setups never fail us! This is the way.",
+    "GLORY AND REWARD! 💰 TP2 hit! Take the profits and honor the process! This is the way.",
+    "Absolute perfection in battle! 🎯 TP2 reached. Pure algorithmic precision! This is the way.",
+    "Treasury overflowing! 💵 TP2 hit in full. Capital grown like a true warrior! This is the way.",
+    "TP2 Tagged and Bagged! 💼 Maximum reward achieved on the field! This is the way.",
+    "Full Target hit! 🎯 Zero hesitation, pure expansion straight to TP2! This is the way.",
+    "WE CONQUERED THE CHARTS! 👨‍🍳 TP2 hit in full! Excellent adherence to the code! This is the way.",
+    "TP2 complete! 🚀 Stand up and salute this warrior-grade execution! This is the way.",
+    "1:2 R/R delivered on a silver shield! 🛡️ TP2 hit! This is the way.",
+    "Account balance rising, rules holding firm! 📈 TP2 fully hit! This is the way.",
+    "TP2 Cleared! 🎯 Another successful campaign on the 15M timeframe! This is the way.",
+    "Bounty delivered directly to the vault! 🏦 TP2 completely hit! This is the way."
 ]
 
+# ------------------------------------------------------------------------------
+# SL HIT: Stop Loss triggered — Honorable, brave, small scratch, zero fear
+# ------------------------------------------------------------------------------
 SL_HIT_MESSAGES = [
-    "Stop Loss hit! 🛑 Part of the game — risk was strictly managed at scalp levels. On to the next!",
-    "SL taken out! 🛡️ Remember: A loss is just the cost of doing business. Rules were followed!",
-    "SL hit! 📉 No worries at all — disciplined risk management keeps us alive for the big wins!",
-    "Stop Loss triggered! 🛑 We accept the small loss gracefully and wait for the next High/Medium setup.",
-    "SL hit! 🥊 Took the punch, kept the discipline. The edge wins over 100 trades!",
-    "Stop Loss hit! 🛑 Zero emotion. Process over outcome every single time!",
-    "SL hit! 📉 Managed loss = Healthy trading. Capital protected for the next signal!",
-    "Stop Loss taken! 🛑 The market gave a slight twist, but our risk was small and controlled.",
-    "SL triggered! 🛡️ We respect the Stop Loss like true professionals. Next setup loading!",
-    "SL hit! 🛑 A small setback for a major comeback. Stay disciplined!",
-    "Stop Loss hit! 📉 Rule #1: Protect capital. Small loss accepted, moving forward!",
-    "SL triggered! 🛑 No revenge trading! We wait patiently for the next valid window.",
-    "SL hit! 🛡️ Proper position sizing means this is just a scratch. Next signal awaits!",
-    "Stop Loss taken out! 🛑 Standard cost of probability trading. Head up!",
-    "SL hit! 📉 Risk was capped, rules were honored. Proud of the discipline!",
-    "SL hit! 🛑 The indicator did its job, the market did its move. We execute and move on!",
-    "Stop Loss triggered! 🛡️ Defended the account. On to the next trading session!",
-    "SL hit! 🛑 Professional traders take losses with a smile. We follow the plan!",
-    "SL taken! 📉 1 loss won't break us when 1:2 R/R wins build us. Next!",
-    "Stop Loss hit! 🛑 Kept it tight in Scalp Mode. Minimal damage, maximum discipline!",
-    "SL hit! 🛡️ Dust off, reset, and wait for the next high-probability setup!",
-    "SL triggered! 🛑 Part of the process. We applaud following the risk plan!",
-    "Stop Loss hit! 📉 Protect the equity curve — on to the next opportunity!",
-    "SL hit! 🛑 Strict risk parameters worked as intended. We stay composed!",
-    "SL taken! 🛡️ Capital preserved, mind clear. Ready for the next run!"
+    "A honorable scratch on our Beskar! 🛑 SL hit, but risk was tightly controlled. On to the next battle! This is the way.",
+    "SL taken out, but our spirits stand tall! 🛡️ A loss is just the cost of war. The code remains intact! This is the way.",
+    "SL hit! 📉 No fear, no hesitation — disciplined risk management keeps us strong for the big wins! This is the way.",
+    "Stop Loss triggered! 🛑 We accept the small loss with honor and prepare for the next setup! This is the way.",
+    "SL hit! 🥊 Took the blow on our shield, kept our composure. The edge wins over 100 battles! This is the way.",
+    "Stop Loss hit! 🛑 Zero emotion, maximum bravery. Process over outcome every single time! This is the way.",
+    "SL hit! 📉 A managed loss is a warrior's discipline. Capital protected for the next campaign! This is the way.",
+    "Stop Loss taken! 🛑 The market shifted, but our risk was small and controlled like a true warrior! This is the way.",
+    "SL triggered! 🛡️ We respect the Stop Loss like true professionals. Next setup loading! This is the way.",
+    "SL hit! 🛑 A minor setback for a major comeback. Stay disciplined and brave! This is the way.",
+    "Stop Loss hit! 📉 Rule #1 of the Creed: Protect your capital. Small loss accepted, forward march! This is the way.",
+    "SL triggered! 🛑 No anger, no revenge trading! We wait patiently for the next valid signal! This is the way.",
+    "SL hit! 🛡️ Proper position sizing means this is just a scratch on our armor. Next signal awaits! This is the way.",
+    "Stop Loss taken out! 🛑 Standard cost of high-probability trading. Keep your head high! This is the way.",
+    "SL hit! 📉 Risk was capped, rules were honored. Be proud of your execution! This is the way.",
+    "SL hit! 🛑 The indicator did its job, the market did its move. We regroup and march on! This is the way.",
+    "Stop Loss triggered! 🛡️ Defended the treasury bravely. On to the next session! This is the way.",
+    "SL hit! 🛑 True warriors take losses with courage and dignity. We follow the plan! This is the way.",
+    "SL taken! 📉 One small scratch will not stop us when 1:2 R/R wins build our empire! This is the way.",
+    "Stop Loss hit! 🛑 Kept it tight in Scalp Mode. Minimal damage, absolute discipline! This is the way.",
+    "SL hit! 🛡️ Dust off your armor, reset your focus, and await the next signal! This is the way.",
+    "SL triggered! 🛑 Part of the path to mastery. We honor the discipline of following the risk plan! This is the way.",
+    "Stop Loss hit! 📉 Protect the equity curve — on to the next opportunity! This is the way.",
+    "SL hit! 🛑 Strict risk parameters defended us as intended. We stay calm and fearless! This is the way.",
+    "SL taken! 🛡️ Capital preserved, mind focused. Ready for the next run! This is the way."
 ]
 
+# ------------------------------------------------------------------------------
+# BE HIT: Break-Even triggered — Zero loss, impenetrable defense, honor intact
+# ------------------------------------------------------------------------------
 BE_HIT_MESSAGES = [
-    "Break-Even hit! 🛡️ Zero loss, capital completely safe! We took a free shot at the market!",
-    "SL at BE triggered! 🤝 No money lost, rules followed 100%. That's professional trading!",
-    "Break-Even exit! 🛡️ TP1 was hit, partials banked, and the rest exited at $0 cost!",
-    "BE hit! ⚖️ Trade closed flat on runner. Profit already locked in from TP1!",
-    "Break-Even triggered! 🛡️ Rules respected, zero draw on equity. On to the next!",
-    "BE hit! 🛡️ Protected our capital like an institution. Outstanding discipline!",
-    "Break-Even closed! 🤝 A free trade that protected our bottom line!",
-    "BE triggered! 🛡️ Partials in pocket + Zero loss on entry = Winning behavior!",
-    "Break-Even exit! ⚖️ Market turned back, but our defense was impenetrable!",
-    "BE hit! 🛡️ Capital intact, mindset strong. Exactly how we manage trades!",
-    "Break-Even triggered! 🛡️ Zero drawdown on the account balance!",
-    "BE exit! 🤝 Followed the prompt, saved the capital. On to the next session!",
-    "Break-Even hit! 🛡️ No harm done, risk managed perfectly!",
-    "BE triggered! ⚖️ Took profit at TP1 and protected the rest. Solid work!",
-    "Break-Even exit! 🛡️ That is why we move SL to BE on TP1! Discipline pays!",
-    "BE hit! 🤝 Free market entry completed with net positive outcome!",
-    "Break-Even closed! 🛡️ Account balance remains secure and protected!",
-    "BE triggered! ⚖️ Textbook risk management execution!",
-    "Break-Even exit! 🛡️ The market tried to reverse, but our shield was up!",
-    "BE hit! 🤝 Net profit secured from TP1, zero loss on remainder!",
-    "Break-Even closed! 🛡️ Masterclass in trade management!",
-    "BE triggered! ⚖️ Capital preserved to fight another session!",
-    "Break-Even exit! 🛡️ Zero regret, 100% execution precision!",
-    "BE hit! 🤝 The rule-following mindset triumphs again!",
-    "Break-Even closed! 🛡️ Safe and sound exit. Ready for the next setup!"
+    "Impenetrable defense! 🛡️ Break-Even hit with zero loss, capital completely safe! We took a free strike at the market! This is the way.",
+    "SL at BE triggered! 🤝 No blood spilled, rules followed 100%. That is warrior discipline! This is the way.",
+    "Break-Even exit! 🛡️ TP1 was hit, partials banked, and the rest exited at $0 cost! This is the way.",
+    "BE hit! ⚖️ Trade closed flat on runner. Profit already locked in from TP1! This is the way.",
+    "Break-Even triggered! 🛡️ Code respected, zero drawdown on our treasury. On to the next! This is the way.",
+    "BE hit! 🛡️ Protected our capital like an impenetrable fortress. Outstanding bravery! This is the way.",
+    "Break-Even closed! 🤝 A free engagement that defended our bottom line completely! This is the way.",
+    "BE triggered! 🛡️ Partials in pocket + Zero loss on entry = Pure winning behavior! This is the way.",
+    "Break-Even exit! ⚖️ The market counter-attacked, but our shield held firm! This is the way.",
+    "BE hit! 🛡️ Capital intact, mindset invincible. Exactly how true warriors manage trades! This is the way.",
+    "Break-Even triggered! 🛡️ Zero drawdown on the account balance! This is the way.",
+    "BE exit! 🤝 Followed the strategy, saved the treasury. On to the next campaign! This is the way.",
+    "Break-Even hit! 🛡️ No harm done, risk managed with absolute mastery! This is the way.",
+    "BE triggered! ⚖️ Took profit at TP1 and protected the rest. Excellent tactical work! This is the way.",
+    "Break-Even exit! 🛡️ That is why we shift SL to BE on TP1! Discipline always pays! This is the way.",
+    "BE hit! 🤝 Free market entry completed with a net positive outcome! This is the way.",
+    "Break-Even closed! 🛡️ Account balance remains secure and unyielding! This is the way.",
+    "BE triggered! ⚖️ Textbook risk management execution under pressure! This is the way.",
+    "Break-Even exit! 🛡️ The market tried to reverse, but our defense was unbreakable! This is the way.",
+    "BE hit! 🤝 Net profit secured from TP1, zero loss on the remaining position! This is the way.",
+    "Break-Even closed! 🛡️ Masterclass in defensive tactical trade management! This is the way.",
+    "BE triggered! ⚖️ Treasury preserved to fight another session with full strength! This is the way.",
+    "Break-Even exit! 🛡️ Zero regret, 100% execution courage and precision! This is the way.",
+    "BE hit! 🤝 The rule-following mindset triumphs over fear once again! This is the way.",
+    "Break-Even closed! 🛡️ Safe and honorable exit. Ready for the next high-probability setup! This is the way."
 ]
 
 # ==============================================================================
 # SESSION FILTERING (ZAMBIA / CAT TIME)
 # ==============================================================================
 def is_in_session(session_type):
+    """
+    Checks if current Zambia / Central Africa Time (CAT) falls within active trading sessions.
+    - ASIAN: 02:00 to 07:42 CAT
+    - NEW_YORK: 15:30 to 21:45 CAT
+    """
     now_cat = datetime.now(ZAMBIA_TZ)
     time_min = now_cat.hour * 60 + now_cat.minute
 
     if session_type == "ASIAN":
-        # 02:00 (120 min) to 07:42 (462 min) CAT
         return 120 <= time_min <= 462
     elif session_type == "NEW_YORK":
-        # 15:30 (930 min) to 21:45 (1305 min) CAT
         return 930 <= time_min <= 1305
     return False
 
@@ -161,6 +187,9 @@ def is_in_session(session_type):
 # INDICATOR ENGINE (EXACT PINE SCRIPT REPLICATION)
 # ==============================================================================
 def calculate_indicators(df_15m, df_1h):
+    """
+    Calculates HTF EMA 50, Supertrend (10, 3.0), ADX (14), and Candle Body Ratio.
+    """
     # 1. Higher Timeframe (1H) EMA 50
     df_1h['HTF_EMA'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
     
@@ -223,7 +252,10 @@ def calculate_indicators(df_15m, df_1h):
 # DISPATCH MESSAGES (DISCORD & TELEGRAM)
 # ==============================================================================
 def send_notification(title, message_body, color_code=3447003):
-    # Discord
+    """
+    Sends Mandalorian-themed alert embeds to Discord Webhook & Telegram Bot.
+    """
+    # Discord Dispatch
     if DISCORD_WEBHOOK_URL:
         payload = {
             "content": "@everyone",
@@ -231,17 +263,17 @@ def send_notification(title, message_body, color_code=3447003):
                 "title": title,
                 "description": message_body,
                 "color": color_code,
-                "footer": {"text": "Trend Targets Pro • ZedSauce Forex Academy"}
+                "footer": {"text": "Trend Targets Pro • Mandalorian Warrior Creed"}
             }]
         }
         try:
             requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
         except Exception as e:
-            print(f"Discord error: {e}")
+            print(f"Discord dispatch error: {e}")
 
-    # Telegram
+    # Telegram Dispatch
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        full_msg = f"*{title}*\n\n{message_body}\n\n_ZedSauce Forex Academy • Zambia_"
+        full_msg = f"*{title}*\n\n{message_body}\n\n_Trend Targets Pro • Warrior Creed_"
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -249,7 +281,7 @@ def send_notification(title, message_body, color_code=3447003):
                 timeout=10
             )
         except Exception as e:
-            print(f"Telegram error: {e}")
+            print(f"Telegram dispatch error: {e}")
 
 # ==============================================================================
 # STATE MANAGEMENT
@@ -274,7 +306,7 @@ def run_scanner():
     state = load_state()
 
     for name, (ticker, session_type) in SYMBOLS.items():
-        # 1. Fetch market data
+        # Fetch 15M and 1H market data
         df_15m = yf.download(tickers=ticker, period="5d", interval="15m", progress=False)
         df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
 
@@ -288,12 +320,14 @@ def run_scanner():
 
         df = calculate_indicators(df_15m, df_1h)
 
-        latest_bar = df.iloc[-2]  # Last closed bar
+        latest_bar = df.iloc[-2]  # Last closed 15M candle
         close_p = float(latest_bar['Close'])
         high_p = float(latest_bar['High'])
         low_p = float(latest_bar['Low'])
 
-        # Check Active Trades for Outcome Monitoring (TP1, TP2, SL, BE)
+        # ----------------------------------------------------------------------
+        # 1. EVALUATE ACTIVE TRADES (TP1, TP2, SL, BE)
+        # ----------------------------------------------------------------------
         if name in state:
             trade = state[name]
             direction = trade['direction']
@@ -386,7 +420,9 @@ def run_scanner():
                     save_state(state)
                     continue
 
-        # 2. Check Session Rules for NEW Signal Generation
+        # ----------------------------------------------------------------------
+        # 2. CHECK SESSION & GENERATE NEW WARRIOR SIGNALS
+        # ----------------------------------------------------------------------
         if not is_in_session(session_type):
             continue
 
@@ -416,10 +452,10 @@ def run_scanner():
         if tier < 2:
             continue
 
-        tier_txt = "HIGH PROBABILITY ⭐⭐⭐" if tier == 3 else "MEDIUM PROBABILITY ⭐⭐"
+        tier_txt = "HIGH PROBABILITY WARRIOR SETUP ⭐⭐⭐" if tier == 3 else "MEDIUM PROBABILITY WARRIOR SETUP ⭐⭐"
         direction = "BUY" if buy_flip else "SELL"
 
-        # Scalp Mode SL: Swing Low/High of 3 candles before trigger candle
+        # Scalp Mode SL: Swing Low/High of 3 candles preceding the trigger candle
         lookback_bars = df.iloc[-5:-2]
         sl_px = float(lookback_bars['Low'].min()) if buy_flip else float(lookback_bars['High'].max())
 
@@ -427,7 +463,7 @@ def run_scanner():
         tp1_px = close_p + risk if buy_flip else close_p - risk
         tp2_px = close_p + (risk * 2.0) if buy_flip else close_p - (risk * 2.0)
 
-        # Record New Active Trade
+        # Save New Active Trade to State
         state[name] = {
             "direction": direction,
             "entry": close_p,
@@ -439,18 +475,19 @@ def run_scanner():
         }
         save_state(state)
 
-        # Send Setup Alert
-        emoji = "🟢" if direction == "BUY" else "🔴"
+        # Dispatch Mandalorian Setup Alert
+        emoji = "⚔️ 🟢" if direction == "BUY" else "⚔️ 🔴"
         color = 5763719 if direction == "BUY" else 15548997
 
         msg_body = (
-            f"{emoji} *{direction} Signal Confirmed on {name} (15M)*\n"
+            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} (15M)*\n"
             f"• *Tier:* `{tier_txt}`\n\n"
             f"• *Entry Price:* `{close_p:.2f}`\n"
             f"• *Stop Loss (Scalp):* `{sl_px:.2f}`\n"
             f"• *TP1 (1:1 R/R):* `{tp1_px:.2f}`\n"
             f"• *TP2 (1:2 R/R):* `{tp2_px:.2f}`\n\n"
-            f"• *ADX Strength:* `{adx_val:.1f}` | *Candle Body:* `{body_ratio*100:.1f}%`"
+            f"• *ADX Strength:* `{adx_val:.1f}` | *Candle Body:* `{body_ratio*100:.1f}%`\n\n"
+            f"*Honor the risk rules and execute with courage. This is the way.*"
         )
         send_notification(f"🚨 TREND TARGETS PRO — {name}", msg_body, color_code=color)
 
