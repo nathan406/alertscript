@@ -1,0 +1,40 @@
+name: Build, Run, and Notify
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Run your script/application steps here
+      - name: Run Application Script
+        run: |
+          echo "Executing code..."
+
+      # Send Telegram Notification
+      - name: Send Telegram Message
+        uses: appleboy/telegram-action@v1
+        if: always()
+        with:
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          message: |
+            🚀 GitHub Actions Workflow Finished!
+            Repository: ${{ github.repository }}
+            Commit: ${{ github.sha }}
+
+      # Send Discord Notification
+      - name: Send Discord Message
+        uses: IlshatS/action-discord@master
+        if: always()
+        with:
+          args: '🚀 Workflow run completed for repository: ${{ github.repository }}'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
