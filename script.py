@@ -21,7 +21,7 @@ import yfinance as yf
 # ==============================================================================
 # PRODUCTION MODE CONFIGURATION
 # ==============================================================================
-# Set TEST_MODE = False -> 15m Timeframe, Medium/High prob setups, strict session filters.
+# TEST_MODE is permanently False -> Strict 15m Timeframe, Medium/High prob setups only.
 TEST_MODE = False
 
 # Webhooks and Bot tokens for dispatching warrior dispatches
@@ -80,9 +80,6 @@ def is_in_session(session_type):
     - ASIAN: 02:00 to 07:45 CAT (120 to 465 minutes)
     - NEW_YORK: 15:30 to 21:45 CAT (930 to 1305 minutes)
     """
-    if TEST_MODE or session_type == "24/7":
-        return True
-
     now_cat = datetime.now(ZAMBIA_TZ)
     time_min = now_cat.hour * 60 + now_cat.minute
 
@@ -156,7 +153,6 @@ def calculate_indicators(df_lower, df_1h):
 # DISPATCH MESSAGES
 # ==============================================================================
 def send_notification(title, message_body, color_code=3447003):
-    # Discord Dispatch
     if DISCORD_WEBHOOK_URL:
         payload = {
             "content": "@everyone",
@@ -172,7 +168,6 @@ def send_notification(title, message_body, color_code=3447003):
         except Exception as e:
             print(f"Discord dispatch error: {e}")
 
-    # Telegram Dispatch
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         full_msg = f"*{title}*\n\n{message_body}\n\n_Trend Targets Pro • Warrior Creed_"
         try:
@@ -206,11 +201,10 @@ def save_state(state):
 def run_scanner():
     state = load_state()
 
-    tf_interval = "1m" if TEST_MODE else "15m"
-    tf_period = "1d" if TEST_MODE else "5d"
+    tf_interval = "15m"
+    tf_period = "5d"
 
     for name, (ticker, session_type) in SYMBOLS.items():
-        # Fetch candle data
         df_lower = yf.download(tickers=ticker, period=tf_period, interval=tf_interval, progress=False)
         df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
 
@@ -236,7 +230,7 @@ def run_scanner():
         sell_flip = (prev_st == 1)  and (curr_st == -1)
 
         # ----------------------------------------------------------------------
-        # 1. EVALUATE ACTIVE TRADES (TP1, TP2, SL, BE, REVERSE EXIT)
+        # 1. EVALUATE ACTIVE TRADES
         # ----------------------------------------------------------------------
         if name in state:
             trade = state[name]
@@ -261,14 +255,14 @@ def run_scanner():
                     trade['sl_moved_to_be'] = True
                     save_state(state)
                     send_notification(
-                        f"🎯 TP1 HIT — {name} ({tf_interval.upper()})",
+                        f"🎯 TP1 HIT — {name} (15m)",
                         f"{random.choice(TP1_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP1:* `{tp1:.2f}`\n• *New SL:* `{entry:.2f} (Break Even)`",
                         color_code=65280
                     )
 
                 elif trade['tp1_hit'] and high_p >= tp2:
                     send_notification(
-                        f"🚀 FULL TP2 HIT — {name} ({tf_interval.upper()})",
+                        f"🚀 FULL TP2 HIT — {name} (15m)",
                         f"{random.choice(TP2_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP2 (1:2):* `{tp2:.2f}`",
                         color_code=65280
                     )
@@ -299,14 +293,14 @@ def run_scanner():
                     trade['sl_moved_to_be'] = True
                     save_state(state)
                     send_notification(
-                        f"🎯 TP1 HIT — {name} ({tf_interval.upper()})",
+                        f"🎯 TP1 HIT — {name} (15m)",
                         f"{random.choice(TP1_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP1:* `{tp1:.2f}`\n• *New SL:* `{entry:.2f} (Break Even)`",
                         color_code=65280
                     )
 
                 elif trade['tp1_hit'] and low_p <= tp2:
                     send_notification(
-                        f"🚀 FULL TP2 HIT — {name} ({tf_interval.upper()})",
+                        f"🚀 FULL TP2 HIT — {name} (15m)",
                         f"{random.choice(TP2_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP2 (1:2):* `{tp2:.2f}`",
                         color_code=65280
                     )
@@ -332,7 +326,7 @@ def run_scanner():
                     continue
 
         # ----------------------------------------------------------------------
-        # 2. CHECK SESSION & GENERATE NEW SIGNALS
+        # 2. CHECK SESSION & GENERATE NEW 15M SIGNALS
         # ----------------------------------------------------------------------
         if not is_in_session(session_type):
             continue
@@ -344,17 +338,14 @@ def run_scanner():
         adx_val = float(latest_bar['ADX'])
         body_ratio = float(latest_bar['BodyRatio'])
 
-        if not TEST_MODE:
-            is_htf_aligned = (close_p > htf_ema) if buy_flip else (close_p < htf_ema)
-            is_strong_trend = (adx_val >= 20.0) and (body_ratio >= 0.40)
-            
-            if not (is_htf_aligned and is_strong_trend):
-                continue
+        # Strict Medium/High Probability filters
+        is_htf_aligned = (close_p > htf_ema) if buy_flip else (close_p < htf_ema)
+        is_strong_trend = (adx_val >= 20.0) and (body_ratio >= 0.40)
+        
+        if not (is_htf_aligned and is_strong_trend):
+            continue
 
-            tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if adx_val >= 25 else "MEDIUM PROBABILITY SETUP ⭐⭐"
-        else:
-            tier_txt = "TEST RUN SIGNAL ⭐⭐⭐"
-
+        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if adx_val >= 25 else "MEDIUM PROBABILITY SETUP ⭐⭐"
         direction = "BUY" if buy_flip else "SELL"
 
         lookback_bars = df.iloc[-6:-1]
@@ -382,7 +373,7 @@ def run_scanner():
         color = 5763719 if direction == "BUY" else 15548997
 
         msg_body = (
-            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} ({tf_interval.upper()})*\n"
+            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} (15m)*\n"
             f"• *Tier:* `{tier_txt}`\n\n"
             f"• *Entry Price:* `{close_p:.2f}`\n"
             f"• *Stop Loss:* `{sl_px:.2f}`\n"
