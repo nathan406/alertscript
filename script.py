@@ -411,26 +411,14 @@ def run_scanner():
 # CONTINUOUS EXECUTION LOOP
 # ==============================================================================
 if __name__ == "__main__":
-    print("=" * 60)
-    print(" 🚀 TREND TARGETS PRO ENGINE INITIALIZED")
-    print(f" • Mode: {'1M TEST MODE (All Setups Active)' if TEST_MODE else '15M PRODUCTION MODE'}")
-    print(" • Continuous Scanner Running... Press Ctrl+C to stop.")
-    print("=" * 60)
-
-    # Clean stale state file on initial test startup if needed
+    # Single run execution for GitHub Actions
     if TEST_MODE and os.path.exists(STATE_FILE):
         try:
             os.remove(STATE_FILE)
-            print("Notice: Cleaned active_trades.json for fresh 1m test run.")
         except Exception:
             pass
 
-    while True:
-        try:
-            run_scanner()
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanner Exception: {e}")
-
-        # Scan every 10s in 1m TEST_MODE; every 60s in 15m LIVE mode
-        sleep_interval = 10 if TEST_MODE else 60
-        time.sleep(sleep_interval)
+    try:
+        run_scanner()
+    except Exception as e:
+        print(f"Scanner Exception: {e}")
