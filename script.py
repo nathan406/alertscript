@@ -4,6 +4,22 @@
 # Description: Live Continuous Scanner & Notification Engine for TradingView Setups
 # Theme: Mandalorian / Warrior Creed
 # Core Rule: "This is the way." in every alert message.
+#
+# FIX LOG (this version):
+#   - Session filter now keys off the CANDLE's own timestamp instead of the
+#     wall-clock time the script happens to execute. GitHub Actions cron
+#     schedules are best-effort and can be delayed by several minutes, so a
+#     signal that fires right at a session boundary (e.g. 07:45 CAT close of
+#     the Asian session) could previously be evaluated a few minutes late,
+#     fail the "in session" check, and be lost forever (flip detection only
+#     compared the very last two bars). This was the root cause of the
+#     missed XAUUSD Asian-session alert.
+#   - Flip detection now scans a small lookback window of recent closed bars
+#     (not just the latest one) and tracks the last flip we've already acted
+#     on per symbol, so a delayed or occasionally-skipped Action run doesn't
+#     silently drop a setup.
+#   - GER40 is now restricted to the ASIAN session only (any GER40 flip on
+#     any other session on the 15m is ignored), per request.
 # ==============================================================================
 
 import os
@@ -32,11 +48,17 @@ TELEGRAM_CHAT_ID = "5754432239"
 STATE_FILE = "active_trades.json"
 ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 
+# How many recent closed bars to scan for a flip we haven't acted on yet.
+# This is what protects you from a delayed/skipped GitHub Actions run.
+FLIP_LOOKBACK_BARS = 4
+
 # Symbol mapping: (yfinance ticker, session constraint)
+# GER40 is now ASIAN-only, per request — any flip outside the Asian
+# session window on the 15m is ignored for this symbol.
 SYMBOLS = {
     "BTCUSD": ("BTC-USD", "NEW_YORK"),
     "NDX":    ("NQ=F", "NEW_YORK"),
-    "GER40":  ("^GDAXI", "NEW_YORK"),
+    "GER40":  ("^GDAXI", "ASIAN"),
     "XAUUSD": ("GC=F", "ASIAN"),
 }
 
@@ -74,14 +96,26 @@ BE_HIT_MESSAGES = [
 # ==============================================================================
 # SESSION FILTERING (CAT TIME: 02:00 - 07:45 ASIAN | 15:30 - 21:45 NEW YORK)
 # ==============================================================================
-def is_in_session(session_type):
+def to_cat(ts: pd.Timestamp) -> pd.Timestamp:
     """
-    Checks if current Central Africa Time (CAT) falls within designated market sessions.
-    - ASIAN: 02:00 to 07:45 CAT (120 to 465 minutes)
-    - NEW_YORK: 15:30 to 21:45 CAT (930 to 1305 minutes)
+    Convert a pandas Timestamp (tz-aware in whatever timezone yfinance
+    returned it in, or tz-naive) into Africa/Lusaka time. yfinance does not
+    consistently return the same source timezone across tickers/exchanges,
+    so we can't assume UTC — tz_convert handles it correctly either way.
     """
-    now_cat = datetime.now(ZAMBIA_TZ)
-    time_min = now_cat.hour * 60 + now_cat.minute
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    return ts.tz_convert(ZAMBIA_TZ)
+
+
+def is_time_in_session(cat_dt, session_type):
+    """
+    Checks whether a given Africa/Lusaka datetime falls within a
+    designated market session.
+      - ASIAN:    02:00 to 07:45 CAT (120 to 465 minutes)
+      - NEW_YORK: 15:30 to 21:45 CAT (930 to 1305 minutes)
+    """
+    time_min = cat_dt.hour * 60 + cat_dt.minute
 
     if session_type == "ASIAN":
         return 120 <= time_min <= 465
@@ -89,12 +123,21 @@ def is_in_session(session_type):
         return 930 <= time_min <= 1305
     return False
 
+
+def is_bar_in_session(bar_timestamp, session_type):
+    """
+    Session check anchored to the CANDLE's own close time, not to the
+    wall-clock time the script happens to execute. This is what makes the
+    filter immune to GitHub Actions scheduling delays/jitter.
+    """
+    return is_time_in_session(to_cat(bar_timestamp), session_type)
+
 # ==============================================================================
 # INDICATOR ENGINE
 # ==============================================================================
 def calculate_indicators(df_lower, df_1h):
     df_1h['HTF_EMA'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
-    
+
     df_lower = pd.merge_asof(
         df_lower.sort_index(),
         df_1h[['HTF_EMA']].sort_index(),
@@ -149,6 +192,27 @@ def calculate_indicators(df_lower, df_1h):
 
     return df_lower
 
+
+def find_recent_flip(df, lookback=FLIP_LOOKBACK_BARS):
+    """
+    Scan the last `lookback` closed bars (instead of only the very last one)
+    for a Supertrend flip. Returns (flip_index, direction, flip_timestamp)
+    for the MOST RECENT flip found in the window, or (None, None, None).
+
+    Scanning a window instead of just the last bar is what protects a signal
+    from being lost if a scheduled run is delayed or occasionally skipped —
+    the flip is still visible a bar or two later.
+    """
+    trend = df['ST_Trend']
+    n = len(trend)
+    start = max(1, n - lookback)
+    for i in range(n - 1, start - 1, -1):
+        if trend.iloc[i] == 1 and trend.iloc[i - 1] == -1:
+            return i, "BUY", df.index[i]
+        elif trend.iloc[i] == -1 and trend.iloc[i - 1] == 1:
+            return i, "SELL", df.index[i]
+    return None, None, None
+
 # ==============================================================================
 # DISPATCH MESSAGES
 # ==============================================================================
@@ -191,9 +255,18 @@ def load_state():
             return {}
     return {}
 
+
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
+
+def get_last_flip_seen(state, name):
+    return state.get("_meta", {}).get(name)
+
+
+def set_last_flip_seen(state, name, flip_timestamp_iso):
+    state.setdefault("_meta", {})[name] = flip_timestamp_iso
 
 # ==============================================================================
 # MAIN SCANNER ROUTINE
@@ -205,8 +278,12 @@ def run_scanner():
     tf_period = "5d"
 
     for name, (ticker, session_type) in SYMBOLS.items():
-        df_lower = yf.download(tickers=ticker, period=tf_period, interval=tf_interval, progress=False)
-        df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
+        try:
+            df_lower = yf.download(tickers=ticker, period=tf_period, interval=tf_interval, progress=False)
+            df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
+        except Exception as e:
+            print(f"Download error for {name}: {e}")
+            continue
 
         if df_lower.empty or len(df_lower) < 50 or df_1h.empty:
             continue
@@ -230,7 +307,8 @@ def run_scanner():
         sell_flip = (prev_st == 1)  and (curr_st == -1)
 
         # ----------------------------------------------------------------------
-        # 1. EVALUATE ACTIVE TRADES
+        # 1. EVALUATE ACTIVE TRADES (always runs, regardless of session —
+        #    you never want to miss closing/managing a live trade)
         # ----------------------------------------------------------------------
         if name in state:
             trade = state[name]
@@ -326,41 +404,62 @@ def run_scanner():
                     continue
 
         # ----------------------------------------------------------------------
-        # 2. CHECK SESSION & GENERATE NEW 15M SIGNALS
+        # 2. LOOK FOR AN UNPROCESSED FLIP AND GENERATE A NEW SIGNAL
+        #    (session + probability filters are now evaluated against the
+        #    FLIP BAR itself, not "now" — see find_recent_flip / is_bar_in_session)
         # ----------------------------------------------------------------------
-        if not is_in_session(session_type):
+        if name in state:
+            # Already have an active trade on this symbol — nothing to open.
             continue
 
-        if not (buy_flip or sell_flip) or name in state:
+        flip_idx, direction, flip_time = find_recent_flip(df, lookback=FLIP_LOOKBACK_BARS)
+        if flip_idx is None:
             continue
 
-        htf_ema = float(latest_bar['HTF_EMA'])
-        adx_val = float(latest_bar['ADX'])
-        body_ratio = float(latest_bar['BodyRatio'])
+        flip_time_iso = flip_time.isoformat()
+        if get_last_flip_seen(state, name) == flip_time_iso:
+            # We've already evaluated this exact flip bar (pass or fail) — don't redo it.
+            continue
+
+        # Mark this flip as seen regardless of outcome below, so we never
+        # re-evaluate the same bar again.
+        set_last_flip_seen(state, name, flip_time_iso)
+        save_state(state)
+
+        if not is_bar_in_session(flip_time, session_type):
+            continue
+
+        flip_bar = df.iloc[flip_idx]
+        flip_close = float(flip_bar['Close'])
+        htf_ema = float(flip_bar['HTF_EMA'])
+        adx_val = float(flip_bar['ADX'])
+        body_ratio = float(flip_bar['BodyRatio'])
+
+        buy_flip_here = direction == "BUY"
 
         # Strict Medium/High Probability filters
-        is_htf_aligned = (close_p > htf_ema) if buy_flip else (close_p < htf_ema)
+        is_htf_aligned = (flip_close > htf_ema) if buy_flip_here else (flip_close < htf_ema)
         is_strong_trend = (adx_val >= 20.0) and (body_ratio >= 0.40)
-        
+
         if not (is_htf_aligned and is_strong_trend):
             continue
 
         tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if adx_val >= 25 else "MEDIUM PROBABILITY SETUP ⭐⭐"
-        direction = "BUY" if buy_flip else "SELL"
 
-        lookback_bars = df.iloc[-6:-1]
-        sl_px = float(lookback_bars['Low'].min()) if buy_flip else float(lookback_bars['High'].max())
+        lookback_start = max(0, flip_idx - 5)
+        lookback_bars = df.iloc[lookback_start:flip_idx]
+        sl_px = float(lookback_bars['Low'].min()) if buy_flip_here else float(lookback_bars['High'].max())
 
-        risk = abs(close_p - sl_px)
+        risk = abs(flip_close - sl_px)
         if risk == 0:
-            risk = close_p * 0.001
+            risk = flip_close * 0.001
 
-        tp1_px = close_p + risk if buy_flip else close_p - risk
-        tp2_px = close_p + (risk * 2.0) if buy_flip else close_p - (risk * 2.0)
+        tp1_px = flip_close + risk if buy_flip_here else flip_close - risk
+        tp2_px = flip_close + (risk * 2.0) if buy_flip_here else flip_close - (risk * 2.0)
 
         state[name] = {
             "direction": direction,
-            "entry": close_p,
+            "entry": flip_close,
             "sl": sl_px,
             "tp1": tp1_px,
             "tp2": tp2_px,
@@ -375,7 +474,7 @@ def run_scanner():
         msg_body = (
             f"{emoji} *{direction} SIGNAL CONFIRMED on {name} (15m)*\n"
             f"• *Tier:* `{tier_txt}`\n\n"
-            f"• *Entry Price:* `{close_p:.2f}`\n"
+            f"• *Entry Price:* `{flip_close:.2f}`\n"
             f"• *Stop Loss:* `{sl_px:.2f}`\n"
             f"• *TP1 (1:1 R/R):* `{tp1_px:.2f}`\n"
             f"• *TP2 (1:2 R/R):* `{tp2_px:.2f}`\n\n"
