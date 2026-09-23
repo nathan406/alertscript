@@ -24,12 +24,13 @@
 # FIX LOG (round 2 — after XAU Asian-session alert was STILL missed,
 # with zero notification on Discord AND Telegram, which rules out a
 # dispatch-side problem like a bad chat ID or blocked bot):
-#   - XAUUSD ticker switched from GC=F (COMEX gold FUTURES) to XAUUSD=X
-#     (Yahoo's continuously-quoted FX-style gold cross). Futures carry a
-#     daily CME maintenance halt and materially thinner/gappier intraday
-#     data overnight, which can mean the 15m candle that actually flipped
-#     never shows up cleanly in the feed during Asian hours — the script
-#     never sees a flip at all, so nothing gets that far in the logic.
+#   - Tried switching XAUUSD from GC=F to XAUUSD=X as a hypothesis about
+#     futures data gaps. CONFIRMED WRONG by a live run: XAUUSD=X returns
+#     HTTP 404, it isn't a real Yahoo symbol at all. Yahoo has no true
+#     spot-gold cross — gold is only GC=F (futures) or GLD (US-hours ETF).
+#     Reverted to GC=F. Its daily CME maintenance halt (~17:00-18:00 ET)
+#     falls around 23:00-00:00 CAT, outside the 02:00-07:45 Asian window,
+#     so it isn't expected to gap during the hours that matter here.
 #   - FLIP_LOOKBACK_BARS increased from 4 to 8 (2 hours) for extra margin
 #     against Actions scheduling delays.
 #   - Verbose per-symbol logging added throughout run_scanner(): bar count,
@@ -75,13 +76,17 @@ FLIP_LOOKBACK_BARS = 8
 # Symbol mapping: (yfinance ticker, session constraint)
 # GER40 is ASIAN-only, per request — any flip outside the Asian session
 # window on the 15m is ignored for this symbol.
-# XAUUSD uses the FX-style spot cross (XAUUSD=X) instead of the GC=F
-# futures contract — see FIX LOG round 2 above for why.
+# XAUUSD: Yahoo has no true spot-gold cross (XAUUSD=X does not exist —
+# confirmed by a live 404 on 2026-09-23). Gold is only available via
+# GC=F (COMEX futures) or GLD (US-hours-only ETF, no good for Asian
+# session). GC=F's daily CME maintenance halt (~17:00-18:00 ET) lands
+# around 23:00-00:00 CAT, well outside the 02:00-07:45 Asian window, so
+# it should have usable 15m data through the Asian session.
 SYMBOLS = {
     "BTCUSD": ("BTC-USD", "NEW_YORK"),
     "NDX":    ("NQ=F", "NEW_YORK"),
     "GER40":  ("^GDAXI", "ASIAN"),
-    "XAUUSD": ("XAUUSD=X", "ASIAN"),
+    "XAUUSD": ("GC=F", "ASIAN"),
 }
 
 # ==============================================================================
