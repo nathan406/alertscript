@@ -39,7 +39,11 @@ jobs:
           # Pull latest changes to avoid race conditions during 15m cron overlaps
           git pull --rebase origin main || echo "No remote changes to pull"
           
-          git add active_trades.json
+          # xauusd_htf_cache.json caches Twelve Data's 1h XAUUSD series so it's
+          # only refetched once an hour instead of every run — needs to be
+          # committed alongside active_trades.json or the cache never persists
+          # between runs (each run starts from a fresh checkout).
+          git add active_trades.json xauusd_htf_cache.json
           
           # Commit only if changes exist and push explicitly to main
           git diff --staged --quiet || (git commit -m "Auto-update active trades state [skip ci]" && git push origin HEAD:main)

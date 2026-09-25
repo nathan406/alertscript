@@ -41,6 +41,31 @@
 #     another guess. send_notification() now also logs the HTTP status
 #     code from Discord/Telegram so a silent rejection (bad token, blocked
 #     bot, rate limit) shows up too.
+#
+# FIX LOG (round 3 — XAUUSD still missed a genuine Asian-session MEDIUM
+# setup that showed on the TradingView chart. Two separate problems found):
+#   1. The probability filter required ALL THREE scoring criteria (HTF AND
+#      ADX AND Body) before alerting — mathematically only Pine's HIGH tier
+#      (3/3). Every true MEDIUM setup (2/3, like this one) was silently
+#      dropped regardless of session/data issues. Rewritten to score 0-3
+#      and alert on MEDIUM (2/3) or HIGH (3/3), matching the Pine logic,
+#      with consolidation (ADX<15) still forcing LOW regardless of score.
+#   2. GC=F never produced a flip at all during this setup — a real
+#      futures-vs-spot data divergence, not a filter issue. Tried PAXG-USD
+#      (crypto gold proxy) as a free fix; switched again after confirming
+#      the user's chart is actually OANDA:XAUUSD, which needs a genuine
+#      spot/forex-style feed to match closely. OANDA's own v20 API was the
+#      obvious next choice but turned out to be inaccessible — the user's
+#      region was routed to "OANDA Global Markets", an MT4/MT5-only entity
+#      with no fxTrade/API access; not fixable without a different
+#      residency, which isn't something to work around. Landed on Twelve
+#      Data's free tier instead: a genuine XAU/USD spot-style instrument,
+#      no country gating, "Free Forever" (800 credits/day, 8/minute,
+#      resets daily — not a trial). XAUUSD now pulls from Twelve Data;
+#      BTCUSD/NDX/GER40 remain on yfinance, which has had no reported
+#      issues. The 1h HTF-EMA series is cached and only refetched once an
+#      hour (it can't change faster than that anyway) to keep daily credit
+#      usage around ~310/day against the 800 cap, even scanning every 5min.
 # ==============================================================================
 
 import os
@@ -66,6 +91,15 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1550985326770528266/9oOJ
 TELEGRAM_BOT_TOKEN = "8946173658:AAGw-lqdxlgmraOcQyJbyHTlCL7P1dxWbW4"
 TELEGRAM_CHAT_ID = "5754432239"
 
+# Twelve Data — used only for XAUUSD (see FIX LOG round 3). Free Forever
+# plan: 800 credits/day, 8/minute, resets daily at midnight UTC.
+# Regenerate this key from https://twelvedata.com/account/api-keys if it's
+# ever been shared/exposed — it's read-only market data, low risk, but
+# cheap to rotate.
+TWELVE_DATA_API_KEY = "5e19da01f7014f089f0380bd200dab13"
+TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
+HTF_CACHE_FILE = "xauusd_htf_cache.json"  # caches the 1h series for up to an hour
+
 STATE_FILE = "active_trades.json"
 ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 
@@ -73,20 +107,18 @@ ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 # This is what protects you from a delayed/skipped GitHub Actions run.
 FLIP_LOOKBACK_BARS = 8
 
-# Symbol mapping: (yfinance ticker, session constraint)
+# Symbol mapping. Each entry: ticker/instrument symbol, session
+# constraint, and which data source to pull from.
 # GER40 is ASIAN-only, per request — any flip outside the Asian session
 # window on the 15m is ignored for this symbol.
-# XAUUSD: Yahoo has no true spot-gold cross (XAUUSD=X does not exist —
-# confirmed by a live 404 on 2026-09-23). Gold is only available via
-# GC=F (COMEX futures) or GLD (US-hours-only ETF, no good for Asian
-# session). GC=F's daily CME maintenance halt (~17:00-18:00 ET) lands
-# around 23:00-00:00 CAT, well outside the 02:00-07:45 Asian window, so
-# it should have usable 15m data through the Asian session.
+# XAUUSD pulls from Twelve Data (genuine XAU/USD spot-style pricing) —
+# see FIX LOG round 3 for why yfinance (GC=F futures, then PAXG-USD) and
+# OANDA's own API were both dead ends here.
 SYMBOLS = {
-    "BTCUSD": ("BTC-USD", "NEW_YORK"),
-    "NDX":    ("NQ=F", "NEW_YORK"),
-    "GER40":  ("^GDAXI", "ASIAN"),
-    "XAUUSD": ("GC=F", "ASIAN"),
+    "BTCUSD": {"ticker": "BTC-USD", "session": "NEW_YORK", "source": "yfinance"},
+    "NDX":    {"ticker": "NQ=F",    "session": "NEW_YORK", "source": "yfinance"},
+    "GER40":  {"ticker": "^GDAXI",  "session": "ASIAN",    "source": "yfinance"},
+    "XAUUSD": {"ticker": "XAU/USD", "session": "ASIAN",    "source": "twelvedata"},
 }
 
 # ==============================================================================
@@ -158,6 +190,90 @@ def is_bar_in_session(bar_timestamp, session_type):
     filter immune to GitHub Actions scheduling delays/jitter.
     """
     return is_time_in_session(to_cat(bar_timestamp), session_type)
+
+# ==============================================================================
+# TWELVE DATA (XAUUSD only — see FIX LOG round 3)
+# ==============================================================================
+def fetch_twelvedata_series(symbol, interval, outputsize=300):
+    """
+    Fetch a time series from Twelve Data and return it shaped exactly like
+    yfinance's output: a DataFrame with a UTC-aware DatetimeIndex, columns
+    Open/High/Low/Close, sorted oldest-to-newest — so calculate_indicators()
+    and everything downstream needs no special-casing.
+    """
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "timezone": "UTC",
+        "order": "ASC",
+        "apikey": TWELVE_DATA_API_KEY,
+    }
+    resp = requests.get(f"{TWELVE_DATA_BASE_URL}/time_series", params=params, timeout=20)
+    data = resp.json()
+
+    if data.get("status") == "error" or "values" not in data:
+        raise RuntimeError(f"Twelve Data error for {symbol} ({interval}): {data}")
+
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+    df = df.set_index("datetime").sort_index()
+    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+    for col in ["Open", "High", "Low", "Close"]:
+        df[col] = df[col].astype(float)
+    return df[["Open", "High", "Low", "Close"]]
+
+
+def load_htf_cache():
+    if os.path.exists(HTF_CACHE_FILE):
+        try:
+            with open(HTF_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_htf_cache(cache):
+    with open(HTF_CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def get_xauusd_htf_df():
+    """
+    Returns the 1h OHLC DataFrame for XAU/USD, refetched from Twelve Data
+    at most once per hour and cached to disk in between. 1h candles can't
+    meaningfully change more than once an hour anyway, so re-fetching every
+    5-minute scan would just burn API credits for identical data — this
+    keeps daily usage around ~310 credits against the 800/day free cap.
+    """
+    cache = load_htf_cache()
+    now_utc = datetime.now(pytz.UTC)
+    cached_time = cache.get("fetched_at")
+
+    needs_refresh = cached_time is None
+    if not needs_refresh:
+        cached_dt = datetime.fromisoformat(cached_time)
+        needs_refresh = (now_utc - cached_dt).total_seconds() >= 3600
+
+    if needs_refresh:
+        print("[XAUUSD] Refreshing Twelve Data 1h HTF series (cache expired/missing).")
+        df_1h = fetch_twelvedata_series("XAU/USD", "1h", outputsize=200)
+        cache = {
+            "fetched_at": now_utc.isoformat(),
+            "data": df_1h.reset_index().to_json(orient="records", date_format="iso")
+        }
+        save_htf_cache(cache)
+    else:
+        age_min = (now_utc - datetime.fromisoformat(cached_time)).total_seconds() / 60
+        print(f"[XAUUSD] Using cached Twelve Data 1h HTF series (age {age_min:.0f} min).")
+
+    records = json.loads(cache["data"])
+    df_1h = pd.DataFrame(records)
+    df_1h = df_1h.rename(columns={"datetime": "dt"})
+    df_1h["dt"] = pd.to_datetime(df_1h["dt"], utc=True)
+    df_1h = df_1h.set_index("dt").sort_index()
+    return df_1h[["Open", "High", "Low", "Close"]]
 
 # ==============================================================================
 # INDICATOR ENGINE
@@ -313,11 +429,24 @@ def run_scanner():
     run_started_cat = datetime.now(ZAMBIA_TZ)
     print(f"\n===== SCAN START — {run_started_cat.strftime('%Y-%m-%d %H:%M:%S %Z')} =====")
 
-    for name, (ticker, session_type) in SYMBOLS.items():
-        print(f"\n--- {name} ({ticker}, session={session_type}) ---")
+    for name, cfg in SYMBOLS.items():
+        ticker, session_type, source = cfg["ticker"], cfg["session"], cfg["source"]
+        print(f"\n--- {name} ({ticker}, session={session_type}, source={source}) ---")
+
         try:
-            df_lower = yf.download(tickers=ticker, period=tf_period, interval=tf_interval, progress=False)
-            df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
+            if source == "yfinance":
+                df_lower = yf.download(tickers=ticker, period=tf_period, interval=tf_interval, progress=False)
+                df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
+                if isinstance(df_lower.columns, pd.MultiIndex):
+                    df_lower.columns = df_lower.columns.get_level_values(0)
+                if isinstance(df_1h.columns, pd.MultiIndex):
+                    df_1h.columns = df_1h.columns.get_level_values(0)
+            elif source == "twelvedata":
+                df_lower = fetch_twelvedata_series(ticker, "15min", outputsize=300)
+                df_1h = get_xauusd_htf_df()
+            else:
+                print(f"[{name}] SKIPPED — unknown data source '{source}'")
+                continue
         except Exception as e:
             print(f"[{name}] Download error: {e}")
             continue
@@ -326,11 +455,6 @@ def run_scanner():
             print(f"[{name}] SKIPPED — insufficient data "
                   f"(15m bars: {len(df_lower)}, 1h bars: {len(df_1h)})")
             continue
-
-        if isinstance(df_lower.columns, pd.MultiIndex):
-            df_lower.columns = df_lower.columns.get_level_values(0)
-        if isinstance(df_1h.columns, pd.MultiIndex):
-            df_1h.columns = df_1h.columns.get_level_values(0)
 
         df = calculate_indicators(df_lower, df_1h)
 
@@ -493,22 +617,45 @@ def run_scanner():
 
         buy_flip_here = direction == "BUY"
 
-        # Strict Medium/High Probability filters
-        is_htf_aligned = (flip_close > htf_ema) if buy_flip_here else (flip_close < htf_ema)
-        is_strong_trend = (adx_val >= 20.0) and (body_ratio >= 0.40)
+        # Score each of the 3 criteria exactly like the Pine indicator does
+        # (HTF agreement, ADX strength, body strength), then classify as
+        # HIGH (3/3), MEDIUM (2/3), or LOW (0-1/3, or forced LOW if the
+        # market is consolidating regardless of score). Only HIGH/MEDIUM
+        # get an alert — matching "medium and high probability setups only".
+        #
+        # PREVIOUS BUG: this used to require ALL THREE criteria (HTF AND
+        # ADX AND Body) before sending anything, which is mathematically
+        # only Pine's HIGH tier (3/3) — every genuine MEDIUM (2/3) setup,
+        # like the SELL MEDIUM signal that prompted this fix, was being
+        # silently dropped here regardless of session or data issues.
+        is_htf_aligned    = (flip_close > htf_ema) if buy_flip_here else (flip_close < htf_ema)
+        is_adx_strong     = adx_val >= 20.0
+        is_body_strong    = body_ratio >= 0.40
+        is_consolidating  = adx_val < 15.0
 
-        print(f"[{name}] Filters — HTF aligned: {is_htf_aligned} "
+        score = int(is_htf_aligned) + int(is_adx_strong) + int(is_body_strong)
+        if is_consolidating:
+            tier = "LOW"
+        elif score == 3:
+            tier = "HIGH"
+        elif score == 2:
+            tier = "MEDIUM"
+        else:
+            tier = "LOW"
+
+        print(f"[{name}] Score {score}/3 — HTF aligned: {is_htf_aligned} "
               f"(close={flip_close:.2f} vs HTF EMA={htf_ema:.2f}) | "
-              f"ADX>=20: {adx_val >= 20.0} (ADX={adx_val:.1f}) | "
-              f"Body>=0.40: {body_ratio >= 0.40} (body={body_ratio:.2f})")
+              f"ADX>=20: {is_adx_strong} (ADX={adx_val:.1f}) | "
+              f"Body>=0.40: {is_body_strong} (body={body_ratio:.2f}) | "
+              f"Consolidating (ADX<15): {is_consolidating} -> tier={tier}")
 
-        if not (is_htf_aligned and is_strong_trend):
-            print(f"[{name}] Flip failed probability filters — LOW tier, no alert sent.")
+        if tier == "LOW":
+            print(f"[{name}] Flip is LOW probability — no alert sent.")
             continue
 
-        print(f"[{name}] Flip PASSED filters — dispatching alert.")
+        print(f"[{name}] Flip is {tier} probability — dispatching alert.")
 
-        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if adx_val >= 25 else "MEDIUM PROBABILITY SETUP ⭐⭐"
+        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if tier == "HIGH" else "MEDIUM PROBABILITY SETUP ⭐⭐"
 
         lookback_start = max(0, flip_idx - 5)
         lookback_bars = df.iloc[lookback_start:flip_idx]
