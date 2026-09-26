@@ -66,6 +66,49 @@
 #      issues. The 1h HTF-EMA series is cached and only refetched once an
 #      hour (it can't change faster than that anyway) to keep daily credit
 #      usage around ~310/day against the 800 cap, even scanning every 5min.
+#
+# FIX LOG (round 4 — trading plan restructure, per user):
+#   - Sessions redefined entirely: BTCUSD now trades the NY/London overlap
+#     (15:30-17:15 CAT) on the 5m timeframe instead of 15m. NDX now trades
+#     the London session (09:30-17:15 CAT), still 15m. XAUUSD unchanged
+#     (Asian session, 15m). GER40 removed — trading 3 pairs now.
+#   - BTCUSD switched from yfinance to Coinbase's public Exchange API
+#     (free, no key needed) to match the user's actual chart source.
+#     NDX's chart source is CME:NQ1! (continuous front-month Nasdaq
+#     future) — the same instrument family as yfinance's NQ=F, so no
+#     change was needed there.
+#   - Each symbol now carries its own "interval" in SYMBOLS instead of one
+#     global 15m for everything. The flip-detection lookback window used to
+#     be a fixed bar count (8 bars = 2h at 15m); it's now defined in MINUTES
+#     (FLIP_LOOKBACK_MINUTES) and converted to a bar count per symbol, so a
+#     5m symbol still gets ~2h of safety margin against scheduling gaps
+#     instead of only 40 minutes (8 bars x 5m).
+#   - CRITICAL BUG CAUGHT BEFORE SHIPPING: an earlier pass at this rewrite
+#     left the code half-migrated — it referenced a session-check branch
+#     for "LONDON"/"NY_LONDON_OVERLAP" that was never actually added to
+#     is_time_in_session() (so those symbols would have silently never
+#     fired), left GER40 in SYMBOLS, left BTCUSD on yfinance despite the
+#     comment saying otherwise, and referenced a FLIP_LOOKBACK_BARS
+#     constant that no longer existed — a NameError that would have
+#     crashed the script immediately on every single run. Caught by
+#     actually running `python3 script.py` locally before calling this
+#     done, not just a syntax-level compile check. All of the above is
+#     fixed in this version; is_time_in_session() now uses a proper
+#     SESSION_WINDOWS table instead of scattered if/elif branches so this
+#     class of drift is harder to reintroduce.
+#   - Invalidation logic (new): any new opposing Supertrend flip invalidates
+#     an active trade that hasn't hit SL/BE/TP2 yet — regardless of the new
+#     flip's own tier or session status, since this is risk management on
+#     an open position, not a fresh-entry decision. This is independent
+#     from whether that same flip ALSO qualifies for its own new trade
+#     (in-session AND Medium/High). Both can be true: a "close manually"
+#     warning fires for the old position (the bot only tracks state, it
+#     can't touch a real broker position) and a separate new-signal alert
+#     fires for the new one. If the old trade already closed naturally
+#     (SL/BE/TP2, handled in section 1) before a new flip appears, there's
+#     nothing left in state to invalidate, so no manual-close message
+#     fires — matches "we dont get the close manual setup because it
+#     already closed by hitting sl,tp2 or BE".
 # ==============================================================================
 
 import os
@@ -103,22 +146,39 @@ HTF_CACHE_FILE = "xauusd_htf_cache.json"  # caches the 1h series for up to an ho
 STATE_FILE = "active_trades.json"
 ZAMBIA_TZ = pytz.timezone("Africa/Lusaka")
 
-# How many recent closed bars to scan for a flip we haven't acted on yet.
-# This is what protects you from a delayed/skipped GitHub Actions run.
-FLIP_LOOKBACK_BARS = 8
+# How much time to scan back for a flip we haven't acted on yet, regardless
+# of a symbol's candle size. This is what protects you from a delayed/
+# skipped GitHub Actions run. Converted to a per-symbol bar count below
+# since different symbols now run different timeframes.
+FLIP_LOOKBACK_MINUTES = 120
 
-# Symbol mapping. Each entry: ticker/instrument symbol, session
-# constraint, and which data source to pull from.
-# GER40 is ASIAN-only, per request — any flip outside the Asian session
-# window on the 15m is ignored for this symbol.
-# XAUUSD pulls from Twelve Data (genuine XAU/USD spot-style pricing) —
-# see FIX LOG round 3 for why yfinance (GC=F futures, then PAXG-USD) and
-# OANDA's own API were both dead ends here.
+def interval_minutes(interval_str):
+    """'5m' -> 5, '15m' -> 15."""
+    return int(interval_str.rstrip("m"))
+
+def lookback_bars_for(interval_str):
+    """How many bars of `interval_str` fit in FLIP_LOOKBACK_MINUTES, floor 4."""
+    return max(4, round(FLIP_LOOKBACK_MINUTES / interval_minutes(interval_str)))
+
+def to_twelvedata_interval(interval_str):
+    """'5m' -> '5min', '15m' -> '15min' (Twelve Data's own interval format)."""
+    return f"{interval_minutes(interval_str)}min"
+
+# Symbol mapping. Each entry: ticker/instrument symbol, trading session,
+# candle timeframe, and which data source to pull from.
+#   BTCUSD: NY/London overlap (15:30-17:15 CAT), 5m — chart source Coinbase,
+#           pulled from Coinbase's own public Exchange API for the closest
+#           possible match (free, no key needed).
+#   NDX:    London session (09:30-17:15 CAT), 15m — chart source CME:NQ1!,
+#           the continuous front-month Nasdaq future. yfinance's NQ=F is
+#           the same instrument family, so it stays as-is.
+#   XAUUSD: Asian session (02:00-07:45 CAT), 15m — unchanged, still Twelve
+#           Data (see FIX LOG round 3).
+#   GER40 removed per request — trading 3 pairs now.
 SYMBOLS = {
-    "BTCUSD": {"ticker": "BTC-USD", "session": "NEW_YORK", "source": "yfinance"},
-    "NDX":    {"ticker": "NQ=F",    "session": "NEW_YORK", "source": "yfinance"},
-    "GER40":  {"ticker": "^GDAXI",  "session": "ASIAN",    "source": "yfinance"},
-    "XAUUSD": {"ticker": "XAU/USD", "session": "ASIAN",    "source": "twelvedata"},
+    "BTCUSD": {"ticker": "BTC-USD", "session": "NY_LONDON_OVERLAP", "interval": "5m",  "source": "coinbase"},
+    "NDX":    {"ticker": "NQ=F",    "session": "LONDON",            "interval": "15m", "source": "yfinance"},
+    "XAUUSD": {"ticker": "XAU/USD", "session": "ASIAN",             "interval": "15m", "source": "twelvedata"},
 }
 
 # ==============================================================================
@@ -152,15 +212,29 @@ BE_HIT_MESSAGES = [
     "Break-Even exit! 🛡️ TP1 was hit, partials banked, and the rest exited at $0 cost! This is the way."
 ]
 
+INVALIDATED_MESSAGES = [
+    "The winds of battle have shifted! 🔄 A new setup overrides the old — no TP, no SL, just a tactical stand-down before the new charge. This is the way.",
+    "Creed calls for adaptation! 🛡️ The previous setup is invalidated by a fresh signal in the other direction. Better to regroup than fight a battle already lost. This is the way.",
+    "New orders from the Foundry! ⚔️ The old position stands down, untouched by TP or SL — a sharper blade has been drawn. This is the way."
+]
+
 # ==============================================================================
-# SESSION FILTERING (CAT TIME: 02:00 - 07:45 ASIAN | 15:30 - 21:45 NEW YORK)
+# SESSION FILTERING (Africa/Lusaka = CAT, UTC+2 year-round, no DST)
 # ==============================================================================
+# (start_minute, end_minute) since midnight CAT, inclusive.
+SESSION_WINDOWS = {
+    "ASIAN":             (2 * 60,        7 * 60 + 45),   # 02:00 - 07:45 CAT — XAUUSD
+    "LONDON":            (9 * 60 + 30,  17 * 60 + 15),   # 09:30 - 17:15 CAT — NDX
+    "NY_LONDON_OVERLAP": (15 * 60 + 30, 17 * 60 + 15),   # 15:30 - 17:15 CAT — BTCUSD
+}
+
 def to_cat(ts: pd.Timestamp) -> pd.Timestamp:
     """
-    Convert a pandas Timestamp (tz-aware in whatever timezone yfinance
-    returned it in, or tz-naive) into Africa/Lusaka time. yfinance does not
-    consistently return the same source timezone across tickers/exchanges,
-    so we can't assume UTC — tz_convert handles it correctly either way.
+    Convert a pandas Timestamp (tz-aware in whatever timezone the source API
+    returned it in, or tz-naive) into Africa/Lusaka time. Data sources don't
+    consistently return the same source timezone — tz_convert handles it
+    correctly regardless of what it started as. Zambia has no DST, so CAT is
+    always a fixed UTC+2 — this conversion is exact year-round.
     """
     if ts.tzinfo is None:
         ts = ts.tz_localize('UTC')
@@ -168,19 +242,13 @@ def to_cat(ts: pd.Timestamp) -> pd.Timestamp:
 
 
 def is_time_in_session(cat_dt, session_type):
-    """
-    Checks whether a given Africa/Lusaka datetime falls within a
-    designated market session.
-      - ASIAN:    02:00 to 07:45 CAT (120 to 465 minutes)
-      - NEW_YORK: 15:30 to 21:45 CAT (930 to 1305 minutes)
-    """
+    """Checks whether a given Africa/Lusaka datetime falls within a named session window."""
+    window = SESSION_WINDOWS.get(session_type)
+    if window is None:
+        return False
+    start_min, end_min = window
     time_min = cat_dt.hour * 60 + cat_dt.minute
-
-    if session_type == "ASIAN":
-        return 120 <= time_min <= 465
-    elif session_type == "NEW_YORK":
-        return 930 <= time_min <= 1305
-    return False
+    return start_min <= time_min <= end_min
 
 
 def is_bar_in_session(bar_timestamp, session_type):
@@ -276,6 +344,34 @@ def get_xauusd_htf_df():
     return df_1h[["Open", "High", "Low", "Close"]]
 
 # ==============================================================================
+# COINBASE (BTCUSD only) — public Exchange API, no key/auth needed
+# ==============================================================================
+COINBASE_BASE_URL = "https://api.exchange.coinbase.com"
+
+def fetch_coinbase_series(product_id, granularity_seconds, limit=300):
+    """
+    Fetch OHLC candles from Coinbase's public Exchange API. No API key or
+    auth required — it's public market data. granularity_seconds must be
+    one of Coinbase's supported buckets: 60, 300, 900, 3600, 21600, 86400.
+    Returns a DataFrame shaped like the other fetch functions: UTC-aware
+    DatetimeIndex, Open/High/Low/Close columns, oldest-to-newest. Coinbase
+    caps each response at 300 candles and returns them newest-first, so
+    both need handling here.
+    """
+    params = {"granularity": granularity_seconds}
+    resp = requests.get(f"{COINBASE_BASE_URL}/products/{product_id}/candles", params=params, timeout=20)
+    rows = resp.json()
+
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Coinbase error for {product_id} ({granularity_seconds}s): {rows}")
+
+    # Coinbase's raw shape per row: [time, low, high, open, close, volume] — newest first.
+    df = pd.DataFrame(rows, columns=["time", "Low", "High", "Open", "Close", "Volume"])
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.set_index("time").sort_index()
+    return df[["Open", "High", "Low", "Close"]].tail(limit)
+
+# ==============================================================================
 # INDICATOR ENGINE
 # ==============================================================================
 def calculate_indicators(df_lower, df_1h):
@@ -336,7 +432,7 @@ def calculate_indicators(df_lower, df_1h):
     return df_lower
 
 
-def find_recent_flip(df, lookback=FLIP_LOOKBACK_BARS):
+def find_recent_flip(df, lookback):
     """
     Scan the last `lookback` closed bars (instead of only the very last one)
     for a Supertrend flip. Returns (flip_index, direction, flip_timestamp)
@@ -423,27 +519,30 @@ def set_last_flip_seen(state, name, flip_timestamp_iso):
 def run_scanner():
     state = load_state()
 
-    tf_interval = "15m"
-    tf_period = "5d"
+    tf_period = "5d"  # yfinance lookback window (NDX only, now the sole yfinance symbol)
 
     run_started_cat = datetime.now(ZAMBIA_TZ)
     print(f"\n===== SCAN START — {run_started_cat.strftime('%Y-%m-%d %H:%M:%S %Z')} =====")
 
     for name, cfg in SYMBOLS.items():
-        ticker, session_type, source = cfg["ticker"], cfg["session"], cfg["source"]
-        print(f"\n--- {name} ({ticker}, session={session_type}, source={source}) ---")
+        ticker, session_type, source, interval = cfg["ticker"], cfg["session"], cfg["source"], cfg["interval"]
+        lookback_bars = lookback_bars_for(interval)
+        print(f"\n--- {name} ({ticker}, session={session_type}, source={source}, interval={interval}) ---")
 
         try:
             if source == "yfinance":
-                df_lower = yf.download(tickers=ticker, period=tf_period, interval=tf_interval, progress=False)
+                df_lower = yf.download(tickers=ticker, period=tf_period, interval=interval, progress=False)
                 df_1h = yf.download(tickers=ticker, period="10d", interval="1h", progress=False)
                 if isinstance(df_lower.columns, pd.MultiIndex):
                     df_lower.columns = df_lower.columns.get_level_values(0)
                 if isinstance(df_1h.columns, pd.MultiIndex):
                     df_1h.columns = df_1h.columns.get_level_values(0)
             elif source == "twelvedata":
-                df_lower = fetch_twelvedata_series(ticker, "15min", outputsize=300)
+                df_lower = fetch_twelvedata_series(ticker, to_twelvedata_interval(interval), outputsize=300)
                 df_1h = get_xauusd_htf_df()
+            elif source == "coinbase":
+                df_lower = fetch_coinbase_series(ticker, interval_minutes(interval) * 60, limit=300)
+                df_1h = fetch_coinbase_series(ticker, 3600, limit=200)
             else:
                 print(f"[{name}] SKIPPED — unknown data source '{source}'")
                 continue
@@ -465,21 +564,18 @@ def run_scanner():
               f"in_session_now={is_time_in_session(latest_bar_cat, session_type)}")
 
         latest_bar = df.iloc[-1]
-        close_p = float(latest_bar['Close'])
         high_p  = float(latest_bar['High'])
         low_p   = float(latest_bar['Low'])
 
-        curr_st = df['ST_Trend'].iloc[-1]
-        prev_st = df['ST_Trend'].iloc[-2]
-
-        buy_flip  = (prev_st == -1) and (curr_st == 1)
-        sell_flip = (prev_st == 1)  and (curr_st == -1)
-
         # ----------------------------------------------------------------------
-        # 1. EVALUATE ACTIVE TRADES (always runs, regardless of session —
-        #    you never want to miss closing/managing a live trade)
+        # 1. MANAGE THE ACTIVE TRADE, IF ANY (always runs, regardless of
+        #    session — you never want to miss closing/managing a live trade).
+        #    Completion rules: before TP1 hits, exit is only at the original
+        #    SL. After TP1 hits, SL moves to break-even and exit is either
+        #    BE or TP2. Invalidation-by-opposing-flip is handled separately
+        #    in section 2, since it can happen regardless of session/tier.
         # ----------------------------------------------------------------------
-        if name in state and name != "_meta":
+        if name in state:
             trade = state[name]
             direction = trade['direction']
             entry = trade['entry']
@@ -489,29 +585,20 @@ def run_scanner():
             print(f"[{name}] Active {direction} trade found — entry={entry:.2f} sl={sl:.2f} "
                   f"tp1={tp1:.2f} tp2={tp2:.2f} tp1_hit={trade['tp1_hit']}")
 
-            if (direction == "BUY" and sell_flip) or (direction == "SELL" and buy_flip):
-                send_notification(
-                    f"🔄 TRADE CLOSED ON REVERSE SIGNAL — {name}",
-                    f"Trend flipped to opposite side. Active `{direction}` trade closed at `{close_p:.2f}`. This is the way.",
-                    color_code=1752220
-                )
-                del state[name]
-                save_state(state)
-
-            elif direction == "BUY":
+            if direction == "BUY":
                 if not trade['tp1_hit'] and high_p >= tp1:
                     trade['tp1_hit'] = True
                     trade['sl_moved_to_be'] = True
                     save_state(state)
                     send_notification(
-                        f"🎯 TP1 HIT — {name} (15m)",
+                        f"🎯 TP1 HIT — {name} ({interval})",
                         f"{random.choice(TP1_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP1:* `{tp1:.2f}`\n• *New SL:* `{entry:.2f} (Break Even)`",
                         color_code=65280
                     )
 
                 elif trade['tp1_hit'] and high_p >= tp2:
                     send_notification(
-                        f"🚀 FULL TP2 HIT — {name} (15m)",
+                        f"🚀 FULL TP2 HIT — {name} ({interval})",
                         f"{random.choice(TP2_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP2 (1:2):* `{tp2:.2f}`",
                         color_code=65280
                     )
@@ -542,14 +629,14 @@ def run_scanner():
                     trade['sl_moved_to_be'] = True
                     save_state(state)
                     send_notification(
-                        f"🎯 TP1 HIT — {name} (15m)",
+                        f"🎯 TP1 HIT — {name} ({interval})",
                         f"{random.choice(TP1_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP1:* `{tp1:.2f}`\n• *New SL:* `{entry:.2f} (Break Even)`",
                         color_code=65280
                     )
 
                 elif trade['tp1_hit'] and low_p <= tp2:
                     send_notification(
-                        f"🚀 FULL TP2 HIT — {name} (15m)",
+                        f"🚀 FULL TP2 HIT — {name} ({interval})",
                         f"{random.choice(TP2_MESSAGES)}\n\n• *Entry:* `{entry:.2f}`\n• *TP2 (1:2):* `{tp2:.2f}`",
                         color_code=65280
                     )
@@ -575,18 +662,21 @@ def run_scanner():
                     continue
 
         # ----------------------------------------------------------------------
-        # 2. LOOK FOR AN UNPROCESSED FLIP AND GENERATE A NEW SIGNAL
-        #    (session + probability filters are now evaluated against the
-        #    FLIP BAR itself, not "now" — see find_recent_flip / is_bar_in_session)
+        # 2. LOOK FOR A NEW, UNPROCESSED FLIP.
+        #    Invalidation rule: ANY new opposing flip invalidates an active
+        #    trade that hasn't hit SL/BE/TP2 yet — regardless of the new
+        #    flip's own tier or session status. That's a separate question
+        #    from whether the new flip ALSO qualifies for its own trade
+        #    (session + MEDIUM/HIGH). Both can be true at once: you get the
+        #    "close manually" warning for the old one AND the new-setup
+        #    alert for the new one. If the old trade already closed
+        #    naturally (SL/BE/TP2, handled in section 1 above and no longer
+        #    in `state`), there's nothing to invalidate — no manual-close
+        #    message is sent.
         # ----------------------------------------------------------------------
-        if name in state:
-            # Already have an active trade on this symbol — nothing to open.
-            print(f"[{name}] Skipping new-signal search — trade already active.")
-            continue
-
-        flip_idx, direction, flip_time = find_recent_flip(df, lookback=FLIP_LOOKBACK_BARS)
+        flip_idx, direction, flip_time = find_recent_flip(df, lookback=lookback_bars)
         if flip_idx is None:
-            print(f"[{name}] No Supertrend flip in the last {FLIP_LOOKBACK_BARS} bars.")
+            print(f"[{name}] No Supertrend flip in the last {lookback_bars} bars.")
             continue
 
         flip_time_cat = to_cat(flip_time)
@@ -604,6 +694,23 @@ def run_scanner():
         set_last_flip_seen(state, name, flip_time_iso)
         save_state(state)
 
+        # --- INVALIDATION: unconditional on any new opposing flip ---
+        if name in state:
+            old = state[name]
+            print(f"[{name}] New {direction} flip found while a {old['direction']} trade was "
+                  f"still open (no TP/SL/BE hit yet) — invalidating, manual close required.")
+            send_notification(
+                f"⚠️ CLOSE MANUALLY — {name}",
+                f"{random.choice(INVALIDATED_MESSAGES)}\n\n"
+                f"• *Old {old['direction']} Entry:* `{old['entry']:.2f}`\n"
+                f"• *SL:* `{old['sl']:.2f}` | *TP1:* `{old['tp1']:.2f}` | *TP2:* `{old['tp2']:.2f}`\n"
+                f"• *Reason:* opposing setup detected on {name} — no TP, SL or BE was hit, close this position manually.",
+                color_code=15105570
+            )
+            del state[name]
+            save_state(state)
+
+        # --- Does THIS flip independently qualify for its own trade? ---
         in_session = is_bar_in_session(flip_time, session_type)
         print(f"[{name}] Flip in {session_type} session? {in_session}")
         if not in_session:
@@ -621,13 +728,9 @@ def run_scanner():
         # (HTF agreement, ADX strength, body strength), then classify as
         # HIGH (3/3), MEDIUM (2/3), or LOW (0-1/3, or forced LOW if the
         # market is consolidating regardless of score). Only HIGH/MEDIUM
-        # get an alert — matching "medium and high probability setups only".
-        #
-        # PREVIOUS BUG: this used to require ALL THREE criteria (HTF AND
-        # ADX AND Body) before sending anything, which is mathematically
-        # only Pine's HIGH tier (3/3) — every genuine MEDIUM (2/3) setup,
-        # like the SELL MEDIUM signal that prompted this fix, was being
-        # silently dropped here regardless of session or data issues.
+        # get a new-trade alert — matching "medium and high probability
+        # setups only". (This tier check has no bearing on the invalidation
+        # above, which already happened unconditionally if applicable.)
         is_htf_aligned    = (flip_close > htf_ema) if buy_flip_here else (flip_close < htf_ema)
         is_adx_strong     = adx_val >= 20.0
         is_body_strong    = body_ratio >= 0.40
@@ -650,16 +753,16 @@ def run_scanner():
               f"Consolidating (ADX<15): {is_consolidating} -> tier={tier}")
 
         if tier == "LOW":
-            print(f"[{name}] Flip is LOW probability — no alert sent.")
+            print(f"[{name}] Flip is LOW probability — no new-trade alert sent.")
             continue
 
-        print(f"[{name}] Flip is {tier} probability — dispatching alert.")
+        print(f"[{name}] Flip is {tier} probability — dispatching new-trade alert.")
 
         tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if tier == "HIGH" else "MEDIUM PROBABILITY SETUP ⭐⭐"
 
-        lookback_start = max(0, flip_idx - 5)
-        lookback_bars = df.iloc[lookback_start:flip_idx]
-        sl_px = float(lookback_bars['Low'].min()) if buy_flip_here else float(lookback_bars['High'].max())
+        sl_lookback_start = max(0, flip_idx - 5)
+        sl_lookback_df = df.iloc[sl_lookback_start:flip_idx]
+        sl_px = float(sl_lookback_df['Low'].min()) if buy_flip_here else float(sl_lookback_df['High'].max())
 
         risk = abs(flip_close - sl_px)
         if risk == 0:
@@ -683,7 +786,7 @@ def run_scanner():
         color = 5763719 if direction == "BUY" else 15548997
 
         msg_body = (
-            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} (15m)*\n"
+            f"{emoji} *{direction} SIGNAL CONFIRMED on {name} ({interval})*\n"
             f"• *Tier:* `{tier_txt}`\n\n"
             f"• *Entry Price:* `{flip_close:.2f}`\n"
             f"• *Stop Loss:* `{sl_px:.2f}`\n"
