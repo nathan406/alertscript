@@ -13,14 +13,5 @@
     "tp2": 30138.25,
     "tp1_hit": false,
     "sl_moved_to_be": false
-  },
-  "BTCUSD": {
-    "direction": "SELL",
-    "entry": 82876.04,
-    "sl": 83588.88,
-    "tp1": 82163.19999999998,
-    "tp2": 81450.35999999997,
-    "tp1_hit": false,
-    "sl_moved_to_be": false
   }
 }
