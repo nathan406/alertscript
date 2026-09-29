@@ -11,8 +11,8 @@
     "sl": 84557.01,
     "tp1": 83506.01,
     "tp2": 82980.51,
-    "tp1_hit": false,
-    "sl_moved_to_be": false
+    "tp1_hit": true,
+    "sl_moved_to_be": true
   },
   "NDX": {
     "direction": "SELL",
