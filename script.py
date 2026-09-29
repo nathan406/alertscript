@@ -96,19 +96,19 @@
 #     fixed in this version; is_time_in_session() now uses a proper
 #     SESSION_WINDOWS table instead of scattered if/elif branches so this
 #     class of drift is harder to reintroduce.
-#   - Invalidation logic (new): any new opposing Supertrend flip invalidates
-#     an active trade that hasn't hit SL/BE/TP2 yet — regardless of the new
-#     flip's own tier or session status, since this is risk management on
-#     an open position, not a fresh-entry decision. This is independent
-#     from whether that same flip ALSO qualifies for its own new trade
-#     (in-session AND Medium/High). Both can be true: a "close manually"
-#     warning fires for the old position (the bot only tracks state, it
-#     can't touch a real broker position) and a separate new-signal alert
-#     fires for the new one. If the old trade already closed naturally
-#     (SL/BE/TP2, handled in section 1) before a new flip appears, there's
-#     nothing left in state to invalidate, so no manual-close message
-#     fires — matches "we dont get the close manual setup because it
-#     already closed by hitting sl,tp2 or BE".
+# FIX LOG (round 5 — trading plan restructure #2, per user):
+#   - BTCUSD eliminated entirely (same treatment as GER40 earlier) — its
+#     dedicated Coinbase fetch code is removed too, not left dormant.
+#   - XAUUSD: Asian window end time moved 07:45 -> 07:55 CAT. Timeframe
+#     moved 15m -> 5m.
+#   - NDX: session moved from LONDON to a new NEW_YORK window, 15:30-21:55
+#     CAT. Timeframe moved 15m -> 5m.
+#   - Alerts now fire on HIGH probability only — MEDIUM setups are still
+#     scored and logged (visible in the run log) but no longer alert or
+#     open a trade. The invalidation rule is unaffected: an active trade
+#     is still invalidated by ANY new opposing flip regardless of that
+#     flip's own tier, exactly as before — this only changes which flips
+#     are allowed to open a NEW trade in the first place.
 # ==============================================================================
 
 import os
@@ -126,7 +126,7 @@ import yfinance as yf
 # ==============================================================================
 # PRODUCTION MODE CONFIGURATION
 # ==============================================================================
-# TEST_MODE is permanently False -> Strict 15m Timeframe, Medium/High prob setups only.
+# TEST_MODE is permanently False -> Strict 5m Timeframe, High probability setups only.
 TEST_MODE = False
 
 # Webhooks and Bot tokens for dispatching warrior dispatches
@@ -166,19 +166,15 @@ def to_twelvedata_interval(interval_str):
 
 # Symbol mapping. Each entry: ticker/instrument symbol, trading session,
 # candle timeframe, and which data source to pull from.
-#   BTCUSD: NY/London overlap (15:30-17:15 CAT), 5m — chart source Coinbase,
-#           pulled from Coinbase's own public Exchange API for the closest
-#           possible match (free, no key needed).
-#   NDX:    London session (09:30-17:15 CAT), 15m — chart source CME:NQ1!,
+#   NDX:    New York session (15:30-21:55 CAT), 5m — chart source CME:NQ1!,
 #           the continuous front-month Nasdaq future. yfinance's NQ=F is
 #           the same instrument family, so it stays as-is.
-#   XAUUSD: Asian session (02:00-07:45 CAT), 15m — unchanged, still Twelve
-#           Data (see FIX LOG round 3).
-#   GER40 removed per request — trading 3 pairs now.
+#   XAUUSD: Asian session (02:00-07:55 CAT), 5m — unchanged source, still
+#           Twelve Data (see FIX LOG round 3).
+#   BTCUSD and GER40 both removed per request — trading 2 pairs now.
 SYMBOLS = {
-    "BTCUSD": {"ticker": "BTC-USD", "session": "NY_LONDON_OVERLAP", "interval": "5m",  "source": "coinbase"},
-    "NDX":    {"ticker": "NQ=F",    "session": "LONDON",            "interval": "15m", "source": "yfinance"},
-    "XAUUSD": {"ticker": "XAU/USD", "session": "ASIAN",             "interval": "15m", "source": "twelvedata"},
+    "NDX":    {"ticker": "NQ=F",    "session": "NEW_YORK", "interval": "5m", "source": "yfinance"},
+    "XAUUSD": {"ticker": "XAU/USD", "session": "ASIAN",    "interval": "5m", "source": "twelvedata"},
 }
 
 # ==============================================================================
@@ -223,9 +219,8 @@ INVALIDATED_MESSAGES = [
 # ==============================================================================
 # (start_minute, end_minute) since midnight CAT, inclusive.
 SESSION_WINDOWS = {
-    "ASIAN":             (2 * 60,        7 * 60 + 45),   # 02:00 - 07:45 CAT — XAUUSD
-    "LONDON":            (9 * 60 + 30,  17 * 60 + 15),   # 09:30 - 17:15 CAT — NDX
-    "NY_LONDON_OVERLAP": (15 * 60 + 30, 17 * 60 + 15),   # 15:30 - 17:15 CAT — BTCUSD
+    "ASIAN":    (2 * 60,        7 * 60 + 55),   # 02:00 - 07:55 CAT — XAUUSD
+    "NEW_YORK": (15 * 60 + 30, 21 * 60 + 55),   # 15:30 - 21:55 CAT — NDX
 }
 
 def to_cat(ts: pd.Timestamp) -> pd.Timestamp:
@@ -342,34 +337,6 @@ def get_xauusd_htf_df():
     df_1h["dt"] = pd.to_datetime(df_1h["dt"], utc=True)
     df_1h = df_1h.set_index("dt").sort_index()
     return df_1h[["Open", "High", "Low", "Close"]]
-
-# ==============================================================================
-# COINBASE (BTCUSD only) — public Exchange API, no key/auth needed
-# ==============================================================================
-COINBASE_BASE_URL = "https://api.exchange.coinbase.com"
-
-def fetch_coinbase_series(product_id, granularity_seconds, limit=300):
-    """
-    Fetch OHLC candles from Coinbase's public Exchange API. No API key or
-    auth required — it's public market data. granularity_seconds must be
-    one of Coinbase's supported buckets: 60, 300, 900, 3600, 21600, 86400.
-    Returns a DataFrame shaped like the other fetch functions: UTC-aware
-    DatetimeIndex, Open/High/Low/Close columns, oldest-to-newest. Coinbase
-    caps each response at 300 candles and returns them newest-first, so
-    both need handling here.
-    """
-    params = {"granularity": granularity_seconds}
-    resp = requests.get(f"{COINBASE_BASE_URL}/products/{product_id}/candles", params=params, timeout=20)
-    rows = resp.json()
-
-    if not isinstance(rows, list):
-        raise RuntimeError(f"Coinbase error for {product_id} ({granularity_seconds}s): {rows}")
-
-    # Coinbase's raw shape per row: [time, low, high, open, close, volume] — newest first.
-    df = pd.DataFrame(rows, columns=["time", "Low", "High", "Open", "Close", "Volume"])
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df = df.set_index("time").sort_index()
-    return df[["Open", "High", "Low", "Close"]].tail(limit)
 
 # ==============================================================================
 # INDICATOR ENGINE
@@ -540,9 +507,6 @@ def run_scanner():
             elif source == "twelvedata":
                 df_lower = fetch_twelvedata_series(ticker, to_twelvedata_interval(interval), outputsize=300)
                 df_1h = get_xauusd_htf_df()
-            elif source == "coinbase":
-                df_lower = fetch_coinbase_series(ticker, interval_minutes(interval) * 60, limit=300)
-                df_1h = fetch_coinbase_series(ticker, 3600, limit=200)
             else:
                 print(f"[{name}] SKIPPED — unknown data source '{source}'")
                 continue
@@ -667,7 +631,7 @@ def run_scanner():
         #    trade that hasn't hit SL/BE/TP2 yet — regardless of the new
         #    flip's own tier or session status. That's a separate question
         #    from whether the new flip ALSO qualifies for its own trade
-        #    (session + MEDIUM/HIGH). Both can be true at once: you get the
+        #    (session + HIGH tier only, as of round 5). Both can be true at once: you get the
         #    "close manually" warning for the old one AND the new-setup
         #    alert for the new one. If the old trade already closed
         #    naturally (SL/BE/TP2, handled in section 1 above and no longer
@@ -727,10 +691,12 @@ def run_scanner():
         # Score each of the 3 criteria exactly like the Pine indicator does
         # (HTF agreement, ADX strength, body strength), then classify as
         # HIGH (3/3), MEDIUM (2/3), or LOW (0-1/3, or forced LOW if the
-        # market is consolidating regardless of score). Only HIGH/MEDIUM
-        # get a new-trade alert — matching "medium and high probability
-        # setups only". (This tier check has no bearing on the invalidation
-        # above, which already happened unconditionally if applicable.)
+        # market is consolidating regardless of score). Only HIGH now gets
+        # a new-trade alert (round 5: tightened from Medium+High to High
+        # only) — MEDIUM/LOW are still scored and logged for visibility,
+        # just no longer alerted or opened. This tier check has no bearing
+        # on the invalidation above, which already happened unconditionally
+        # if applicable, regardless of this flip's tier.
         is_htf_aligned    = (flip_close > htf_ema) if buy_flip_here else (flip_close < htf_ema)
         is_adx_strong     = adx_val >= 20.0
         is_body_strong    = body_ratio >= 0.40
@@ -752,13 +718,13 @@ def run_scanner():
               f"Body>=0.40: {is_body_strong} (body={body_ratio:.2f}) | "
               f"Consolidating (ADX<15): {is_consolidating} -> tier={tier}")
 
-        if tier == "LOW":
-            print(f"[{name}] Flip is LOW probability — no new-trade alert sent.")
+        if tier != "HIGH":
+            print(f"[{name}] Flip is {tier} probability — no new-trade alert sent (HIGH only).")
             continue
 
-        print(f"[{name}] Flip is {tier} probability — dispatching new-trade alert.")
+        print(f"[{name}] Flip is HIGH probability — dispatching new-trade alert.")
 
-        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if tier == "HIGH" else "MEDIUM PROBABILITY SETUP ⭐⭐"
+        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐"
 
         sl_lookback_start = max(0, flip_idx - 5)
         sl_lookback_df = df.iloc[sl_lookback_start:flip_idx]
