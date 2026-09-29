@@ -5,15 +5,6 @@
     "NDX": "2026-09-29T09:30:00-04:00",
     "XAUUSD": "2026-09-29T01:15:00+00:00"
   },
-  "BTCUSD": {
-    "direction": "SELL",
-    "entry": 84031.51,
-    "sl": 84557.01,
-    "tp1": 83506.01,
-    "tp2": 82980.51,
-    "tp1_hit": true,
-    "sl_moved_to_be": true
-  },
   "NDX": {
     "direction": "SELL",
     "entry": 30566.5,
