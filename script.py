@@ -129,17 +129,23 @@ import yfinance as yf
 # TEST_MODE is permanently False -> Strict 5m Timeframe, High probability setups only.
 TEST_MODE = False
 
-# Webhooks and Bot tokens for dispatching warrior dispatches
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1550985326770528266/9oOJm2yH7o7RLaQBBjeH7AW9_Q31tAKBu2ae8w3dk1GIUuFY0NRtlm3AyLv8RQb2vouZ"
-TELEGRAM_BOT_TOKEN = "8946173658:AAGw-lqdxlgmraOcQyJbyHTlCL7P1dxWbW4"
-TELEGRAM_CHAT_ID = "5754432239"
+# Webhooks, bot tokens, and API keys — read from environment variables
+# (populated by GitHub Actions Secrets, see main.yml) rather than hardcoded,
+# so the repo is safe to make public. Locally, export these yourself before
+# running, e.g.: export DISCORD_WEBHOOK_URL="..." (etc for the other three).
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 
-# Twelve Data — used only for XAUUSD (see FIX LOG round 3). Free Forever
-# plan: 800 credits/day, 8/minute, resets daily at midnight UTC.
-# Regenerate this key from https://twelvedata.com/account/api-keys if it's
-# ever been shared/exposed — it's read-only market data, low risk, but
-# cheap to rotate.
-TWELVE_DATA_API_KEY = "5e19da01f7014f089f0380bd200dab13"
+for _name, _val in [("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL),
+                     ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+                     ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
+                     ("TWELVE_DATA_API_KEY", TWELVE_DATA_API_KEY)]:
+    if not _val:
+        print(f"[CONFIG] WARNING: {_name} is empty — check it's set as a "
+              f"GitHub Actions secret AND passed through in main.yml's env block.")
+
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 HTF_CACHE_FILE = "xauusd_htf_cache.json"  # caches the 1h series for up to an hour
 
