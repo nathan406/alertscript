@@ -11,7 +11,7 @@
     "sl": 31457.75,
     "tp1": 31599.75,
     "tp2": 31670.75,
-    "tp1_hit": false,
-    "sl_moved_to_be": false
+    "tp1_hit": true,
+    "sl_moved_to_be": true
   }
 }
