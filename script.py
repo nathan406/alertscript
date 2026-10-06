@@ -697,12 +697,13 @@ def run_scanner():
         # Score each of the 3 criteria exactly like the Pine indicator does
         # (HTF agreement, ADX strength, body strength), then classify as
         # HIGH (3/3), MEDIUM (2/3), or LOW (0-1/3, or forced LOW if the
-        # market is consolidating regardless of score). Only HIGH now gets
-        # a new-trade alert (round 5: tightened from Medium+High to High
-        # only) — MEDIUM/LOW are still scored and logged for visibility,
-        # just no longer alerted or opened. This tier check has no bearing
-        # on the invalidation above, which already happened unconditionally
-        # if applicable, regardless of this flip's tier.
+        # market is consolidating regardless of score). MEDIUM and HIGH
+        # both get a new-trade alert (round 6: reverted from the brief
+        # HIGH-only restriction back to Medium+High for both symbols) —
+        # only LOW is scored and logged but not alerted/opened. This tier
+        # check has no bearing on the invalidation above, which already
+        # happened unconditionally if applicable, regardless of this
+        # flip's tier.
         is_htf_aligned    = (flip_close > htf_ema) if buy_flip_here else (flip_close < htf_ema)
         is_adx_strong     = adx_val >= 20.0
         is_body_strong    = body_ratio >= 0.40
@@ -724,13 +725,13 @@ def run_scanner():
               f"Body>=0.40: {is_body_strong} (body={body_ratio:.2f}) | "
               f"Consolidating (ADX<15): {is_consolidating} -> tier={tier}")
 
-        if tier != "HIGH":
-            print(f"[{name}] Flip is {tier} probability — no new-trade alert sent (HIGH only).")
+        if tier == "LOW":
+            print(f"[{name}] Flip is LOW probability — no new-trade alert sent.")
             continue
 
-        print(f"[{name}] Flip is HIGH probability — dispatching new-trade alert.")
+        print(f"[{name}] Flip is {tier} probability — dispatching new-trade alert.")
 
-        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐"
+        tier_txt = "HIGH PROBABILITY SETUP ⭐⭐⭐" if tier == "HIGH" else "MEDIUM PROBABILITY SETUP ⭐⭐"
 
         sl_lookback_start = max(0, flip_idx - 5)
         sl_lookback_df = df.iloc[sl_lookback_start:flip_idx]
