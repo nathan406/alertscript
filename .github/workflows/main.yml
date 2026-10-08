@@ -45,10 +45,16 @@ jobs:
           git pull --rebase origin main || echo "No remote changes to pull"
           
           # xauusd_htf_cache.json caches Twelve Data's 1h XAUUSD series so it's
-          # only refetched once an hour instead of every run — needs to be
-          # committed alongside active_trades.json or the cache never persists
-          # between runs (each run starts from a fresh checkout).
-          git add active_trades.json xauusd_htf_cache.json
+          # only refetched once an hour instead of every run. decision_log.txt
+          # is the permanent, searchable record of every flip decision the
+          # bot has ever made. Both need to be committed alongside
+          # active_trades.json or they never persist between runs (each run
+          # starts from a fresh checkout).
+          # Only add files that exist — on a fresh repo some of these haven't
+          # been created yet, and `git add` on a missing path fails the step.
+          for f in active_trades.json xauusd_htf_cache.json decision_log.txt; do
+            [ -f "$f" ] && git add "$f"
+          done
           
           # Commit only if changes exist and push explicitly to main
           git diff --staged --quiet || (git commit -m "Auto-update active trades state [skip ci]" && git push origin HEAD:main)
