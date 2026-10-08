@@ -27,3 +27,5 @@
 2026-10-09 01:25:29 CAT | XAUUSD | BUY flip @ 2026-10-09 00:20 CAT | OUT OF SESSION (NEW_YORK) | no alert, tier not scored
 2026-10-09 01:30:33 CAT | XAUUSD | BUY flip @ 2026-10-09 00:30 CAT | OUT OF SESSION (ASIAN) | no alert, tier not scored
 2026-10-09 01:30:34 CAT | XAUUSD | BUY flip @ 2026-10-09 00:20 CAT | OUT OF SESSION (NEW_YORK) | no alert, tier not scored
+2026-10-09 01:35:26 CAT | XAUUSD | BUY flip @ 2026-10-09 00:30 CAT | OUT OF SESSION (ASIAN) | no alert, tier not scored
+2026-10-09 01:35:27 CAT | XAUUSD | BUY flip @ 2026-10-09 00:20 CAT | OUT OF SESSION (NEW_YORK) | no alert, tier not scored
