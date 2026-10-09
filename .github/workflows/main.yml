@@ -2,14 +2,23 @@ name: Trend Targets Pro - Mandalorian Scanner
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # Runs every 15 minutes
+    # Every 5 minutes — GitHub's scheduled-workflow minimum. Runs are
+    # best-effort and can slip a minute or two under load, but this is the
+    # tightest cadence GitHub itself supports. If genuinely second-level
+    # latency is ever needed, run script.py on a VPS/Render/Railway cron
+    # with `* * * * *` — no code changes required.
+    #
+    # COST WARNING: 288 runs/day. Public repos = free & unlimited Actions
+    # minutes. Private repos = 2,000 min/month free tier, which this will
+    # exceed. Keep this repo public unless you're paying for Actions.
+    - cron: '*/5 * * * *'
   workflow_dispatch: # Allows manual trigger from the Actions tab
 
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
-    
+
     # REQUIRED: Grants the workflow permission to write/push code changes back to the repo
     permissions:
       contents: write
@@ -40,10 +49,10 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Pull latest changes to avoid race conditions during 15m cron overlaps
+
+          # Pull latest changes to avoid race conditions during 5m cron overlaps
           git pull --rebase origin main || echo "No remote changes to pull"
-          
+
           # xauusd_htf_cache.json caches Twelve Data's 1h XAUUSD series so it's
           # only refetched once an hour instead of every run. decision_log.txt
           # is the permanent, searchable record of every flip decision the
@@ -55,6 +64,6 @@ jobs:
           for f in active_trades.json xauusd_htf_cache.json decision_log.txt; do
             [ -f "$f" ] && git add "$f"
           done
-          
+
           # Commit only if changes exist and push explicitly to main
           git diff --staged --quiet || (git commit -m "Auto-update active trades state [skip ci]" && git push origin HEAD:main)
