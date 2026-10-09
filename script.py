@@ -28,6 +28,7 @@
 import os
 import json
 import random
+import inspect
 import requests
 from datetime import datetime
 import pytz
@@ -169,18 +170,11 @@ def fetch_twelvedata_series(symbol, interval, outputsize=300):
         df[c] = df[c].astype(float)
     return df[["Open", "High", "Low", "Close"]]
 
-# ------------------------------------------------------------- BIQUOTE (MT5)
 def fetch_biquote_series(symbol, interval_str, limit=300):
     """
-    Fetch OHLC candles from biquote (MetaTrader 5 broker feed) and return a
-    DataFrame shaped like the other fetchers: UTC-aware DatetimeIndex,
-    Open/High/Low/Close, oldest-to-newest.
-
-    The biquote package exposes a small API; rather than hardcoding a method
-    name that may not exist in future versions, we introspect at runtime and
-    try the well-known candidates. The log prints which method and which
-    argument signature actually worked, so a future API change is diagnosable
-    from a single Actions run instead of a debug session.
+    Fetch OHLC candles from biquote (MetaTrader 5 broker feed). Verified
+    against biquote 0.3.0, which uses an `ohlc` method returning columns
+    named openTime/Open/High/Low/Close/volume/tickVolume/isOpen.
     """
     if not BIQUOTE_AVAILABLE:
         raise RuntimeError("biquote package not installed / not importable")
@@ -188,9 +182,9 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
     bq = Biquote()
     mt5_interval = to_mt5_interval(interval_str)
 
-    # --- Discover the candles method --------------------------------------
-    candidates = ["candles", "get_candles", "history", "get_history",
-                  "ohlc", "get_ohlc", "rates", "get_rates"]
+    # --- Discover the candles method -------------------------------------
+    candidates = ["ohlc", "candles", "get_candles", "history",
+                  "get_history", "rates", "get_rates"]
     method = None
     used_name = None
     for mn in candidates:
@@ -202,22 +196,32 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
         available = [m for m in dir(bq) if not m.startswith("_")]
         raise RuntimeError(f"biquote: no candles method found. Available: {available}")
 
-    # --- Try common argument signatures -----------------------------------
-    signature_variants = [
-        {"symbol": symbol, "interval": mt5_interval, "count": limit},
-        {"symbol": symbol, "timeframe": mt5_interval, "count": limit},
-        {"symbol": symbol, "interval": mt5_interval, "limit": limit},
-        {"symbol": symbol, "period": mt5_interval, "count": limit},
-        {"symbol": symbol, "interval": mt5_interval},
-        {"symbol": symbol},
+    # Log the real signature so future API changes are diagnosable in one run.
+    try:
+        print(f"[biquote] {used_name} signature: {inspect.signature(method)}")
+    except Exception:
+        pass
+
+    # --- Try many signatures: kwargs first, then positional --------------
+    attempts = [
+        ("symbol=,timeframe=,limit=", lambda: method(symbol=symbol, timeframe=mt5_interval, limit=limit)),
+        ("symbol=,timeframe=,count=", lambda: method(symbol=symbol, timeframe=mt5_interval, count=limit)),
+        ("symbol=,interval=,limit=",  lambda: method(symbol=symbol, interval=mt5_interval, limit=limit)),
+        ("symbol=,interval=,count=",  lambda: method(symbol=symbol, interval=mt5_interval, count=limit)),
+        ("symbol=,timeframe=",        lambda: method(symbol=symbol, timeframe=mt5_interval)),
+        ("symbol=,interval=",         lambda: method(symbol=symbol, interval=mt5_interval)),
+        ("symbol,M5,limit",           lambda: method(symbol, mt5_interval, limit)),
+        ("symbol,M5",                 lambda: method(symbol, mt5_interval)),
+        ("symbol=",                   lambda: method(symbol=symbol)),
+        ("symbol",                    lambda: method(symbol)),
     ]
     result = None
-    used_sig = None
     last_err = None
-    for kwargs in signature_variants:
+    used_desc = None
+    for desc, fn in attempts:
         try:
-            result = method(**kwargs)
-            used_sig = list(kwargs.keys())
+            result = fn()
+            used_desc = desc
             break
         except TypeError as e:
             last_err = e
@@ -226,17 +230,17 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
             last_err = e
             continue
     if result is None:
-        raise RuntimeError(f"biquote: '{used_name}' rejected all signatures. "
-                           f"Last error: {last_err}")
+        raise RuntimeError(
+            f"biquote: '{used_name}' rejected all attempts. Last error: {last_err}")
 
-    print(f"[biquote] {symbol} {mt5_interval}: used '{used_name}' with args {used_sig}")
+    print(f"[biquote] {symbol} {mt5_interval}: {used_name} succeeded via ({used_desc})")
 
-    # --- Normalise to a DataFrame -----------------------------------------
+    # --- Normalise to a DataFrame ----------------------------------------
     if isinstance(result, pd.DataFrame):
         df = result.copy()
     elif isinstance(result, dict):
         payload = result
-        for k in ("data", "candles", "values", "result", "rates"):
+        for k in ("data", "candles", "values", "result", "rates", "ohlc"):
             if k in payload and isinstance(payload[k], (list, dict)):
                 payload = payload[k]
                 break
@@ -249,36 +253,77 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
     if df.empty:
         raise RuntimeError(f"biquote: empty result for {symbol}")
 
-    # --- Rename columns to Open/High/Low/Close + timestamp -----------------
+    print(f"[biquote] columns: {list(df.columns)}, rows={len(df)}")
+    if len(df) > 0:
+        print(f"[biquote] first row: {df.iloc[0].to_dict()}")
+
+    # --- Rename columns --------------------------------------------------
+    # biquote 0.3.0 uses 'openTime'. Include MT5 and other common variants.
     col_lower = {c.lower(): c for c in df.columns}
     rename_map = {}
-    for src, dst in (("time", "_t"), ("timestamp", "_t"),
-                     ("datetime", "_t"), ("date", "_t"), ("t", "_t"),
-                     ("open", "Open"), ("o", "Open"),
+
+    time_candidates = ["opentime", "open_time", "time", "timestamp",
+                       "datetime", "date", "starttime", "start_time", "t"]
+    for tc in time_candidates:
+        if tc in col_lower and col_lower[tc] not in rename_map:
+            rename_map[col_lower[tc]] = "_t"
+            break
+
+    for src, dst in (("open", "Open"), ("o", "Open"),
                      ("high", "High"), ("h", "High"),
-                     ("low",  "Low"),  ("l", "Low"),
-                     ("close","Close"),("c", "Close")):
+                     ("low", "Low"),  ("l", "Low"),
+                     ("close", "Close"), ("c", "Close")):
         if src in col_lower and col_lower[src] not in rename_map:
             rename_map[col_lower[src]] = dst
+
     df = df.rename(columns=rename_map)
 
     if "_t" not in df.columns:
-        raise RuntimeError(f"biquote: no timestamp column. Columns: {list(df.columns)}")
+        raise RuntimeError(
+            f"biquote: no timestamp column. Columns: {list(df.columns)}")
 
+    # --- Parse timestamps (MT5 uses ms; be tolerant of s/ISO too) --------
     t = df["_t"]
     if pd.api.types.is_numeric_dtype(t):
-        # Heuristic: values > 10^11 are ms, else seconds.
-        unit = "ms" if float(t.iloc[0]) > 1e11 else "s"
-        df["_t"] = pd.to_datetime(t, unit=unit, utc=True)
+        v = float(t.iloc[0])
+        if v > 1e12:                     # milliseconds
+            df["_t"] = pd.to_datetime(t, unit="ms", utc=True)
+        elif v > 1e9:                    # seconds
+            df["_t"] = pd.to_datetime(t, unit="s", utc=True)
+        else:
+            raise RuntimeError(f"biquote: uninterpretable timestamp value: {v}")
     else:
         df["_t"] = pd.to_datetime(t, utc=True)
 
     df = df.set_index("_t").sort_index()
     for c in ["Open", "High", "Low", "Close"]:
         if c not in df.columns:
-            raise RuntimeError(f"biquote: missing '{c}'. Columns: {list(df.columns)}")
+            raise RuntimeError(
+                f"biquote: missing '{c}'. Columns: {list(df.columns)}")
         df[c] = df[c].astype(float)
-    return df[["Open", "High", "Low", "Close"]].tail(limit)
+
+    df = df[["Open", "High", "Low", "Close"]].tail(limit)
+
+    # --- Timeframe verification ------------------------------------------
+    # If biquote ignored our interval argument and returned a default (M1,
+    # M15, etc.), the median gap between bars will reveal it. Log it so a
+    # silent wrong-timeframe bug becomes visible in the first run.
+    if len(df) >= 3:
+        gaps = df.index.to_series().diff().dropna()
+        median_min = gaps.median().total_seconds() / 60
+        expected = interval_minutes(interval_str)
+        tag = "OK" if abs(median_min - expected) < 0.5 else "MISMATCH"
+        print(f"[biquote] bar interval: {median_min:.1f} min "
+              f"(expected {expected}) — {tag}")
+        if abs(median_min - expected) >= 0.5:
+            print(f"[biquote] WARNING: biquote ignored our timeframe argument. "
+                  f"Signals would be computed on the wrong timeframe. "
+                  f"Rejecting this fetch and falling back.")
+            raise RuntimeError(
+                f"biquote returned {median_min:.0f}min bars instead of "
+                f"{expected}min — wrong timeframe")
+
+    return df
 
 # ------------------------------------------------------------- HTF CACHE
 def load_htf_cache():
