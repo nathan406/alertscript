@@ -6,20 +6,17 @@
 #   consolidating (ADX<15) forces LOW · tier 3=HIGH, 2=MEDIUM, else LOW ·
 #   SL = 3-bar swing before signal · TP1=1R · TP2=2R.
 #
-# Round 10 (this version):
-#   - drop_unclosed_candles() tolerance was backwards: `now + 2s` allowed a
-#     bar to be treated as closed 2 SECONDS BEFORE its real close, during
-#     which the provider may still be updating it. This produced phantom
-#     flips on partial data (e.g. the SELL @ 10:50 that wasn't on the chart).
-#     Now requires the bar to have closed at least 5 seconds AGO.
-#   - biquote interval argument fixed: biquote's ohlc() expects '5m'/'1h'
-#     (yfinance-style), NOT 'M5'/'H1' (MT5-style). The MT5 format was being
-#     silently rejected, so biquote fell back to its 1h default → the
-#     timeframe-verification net correctly rejected it and fell back to
-#     yfinance. Now passes '5m' first, MT5 format only as a last resort.
-#   - Data age calculation uses the bar's CLOSE time (last_open + bar_len),
-#     so it's always a small positive number on a live feed.
-#   - Added inspect import for the biquote signature logging.
+# Round 11 (this version):
+#   - interval_minutes() fixed to handle 'h' as well as 'm'. biquote returns
+#     5m bars fine but crashes on int('1h') when fetching the 1h HTF series,
+#     silently forcing the whole NDX symbol to the yfinance fallback.
+#   - Everything else unchanged from Round 10.
+#
+# KNOWN LIMITATION (not a bug — architectural):
+#   Twelve Data's XAU/USD is spot gold but NOT byte-identical to OANDA:XAUUSD.
+#   Supertrend flips will occasionally land on a different candle than the
+#   user's chart. No free polling source avoids this. The only exact-match
+#   solution is to receive signals from TradingView itself via webhook.
 # ==============================================================================
 
 import os
@@ -69,7 +66,17 @@ SL_SWING_LOOKBACK = 3
 SL_BUFFER         = 0.0
 
 def interval_minutes(s):
-    return int(s.rstrip("m"))
+    """
+    '5m' -> 5, '15m' -> 15, '1h' -> 60, '4h' -> 240.
+    Round 11: previously only handled 'm' suffix, which crashed on '1h'
+    (biquote's HTF fetch) with `invalid literal for int() with base 10: '1h'`.
+    """
+    s = s.strip().lower()
+    if s.endswith("m"):
+        return int(s[:-1])
+    if s.endswith("h"):
+        return int(s[:-1]) * 60
+    raise ValueError(f"Unknown interval format: {s!r}")
 
 def lookback_bars_for(s):
     return max(4, round(FLIP_LOOKBACK_MINUTES / interval_minutes(s)))
@@ -78,10 +85,9 @@ def to_twelvedata_interval(s):
     return f"{interval_minutes(s)}min"
 
 def to_mt5_interval(s):
-    """'5m' -> 'M5', '1h' -> 'H1' (MetaTrader 5 timeframe codes)."""
+    """'5m' -> 'M5', '1h' -> 'H1'. Only used as a last-resort biquote fallback."""
     n = interval_minutes(s)
-    unit = s[-1].lower()
-    return f"H{n}" if unit == "h" else f"M{n}"
+    return f"H{n // 60}" if n % 60 == 0 and n >= 60 else f"M{n}"
 
 # ------------------------------------------------------------------- SYMBOLS
 SYMBOLS = {
@@ -171,9 +177,7 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
     Fetch OHLC candles from biquote (MetaTrader 5 broker feed). Verified
     against biquote 0.3.0: ohlc signature is
     (symbol, interval='1h', limit=100, from_=None, to=None) — interval is in
-    the yfinance/Twelve Data format ('5m', '15m', '1h'), NOT the MT5 format
-    ('M5', 'M15', 'H1'). MT5 format is silently rejected, which causes
-    biquote to fall back to its 1h default.
+    the yfinance/Twelve Data format ('5m', '15m', '1h'), NOT the MT5 format.
     """
     if not BIQUOTE_AVAILABLE:
         raise RuntimeError("biquote package not installed / not importable")
@@ -189,7 +193,6 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
     except Exception:
         pass
 
-    # Correct format first, alternatives as safety net.
     attempts = [
         ("symbol=,interval=,limit=",
             lambda: method(symbol=symbol, interval=interval_str, limit=limit)),
@@ -221,7 +224,6 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
 
     print(f"[biquote] {symbol} {interval_str}: succeeded via ({used_desc})")
 
-    # ---- Normalise to DataFrame ----------------------------------------
     if isinstance(result, pd.DataFrame):
         df = result.copy()
     elif isinstance(result, list):
@@ -272,10 +274,6 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
         df[c] = df[c].astype(float)
     df = df[["Open", "High", "Low", "Close"]].tail(limit)
 
-    # ---- Timeframe verification ----------------------------------------
-    # If biquote silently ignored the interval argument and returned its 1h
-    # default, the median gap between bars reveals it. Reject on mismatch —
-    # Supertrend on 1h is not the same signal as Supertrend on 5m.
     if len(df) >= 3:
         gaps = df.index.to_series().diff().dropna()
         median_min = gaps.median().total_seconds() / 60
@@ -348,7 +346,6 @@ def calculate_indicators(df_lower, df_1h):
     high, low, close, open_p = (df_lower["High"], df_lower["Low"],
                                 df_lower["Close"], df_lower["Open"])
 
-    # --- Supertrend(10, 3.0) — bar-for-bar match to the Pine ---
     tr = pd.concat([high - low,
                     (high - close.shift(1)).abs(),
                     (low  - close.shift(1)).abs()], axis=1).max(axis=1)
@@ -379,7 +376,6 @@ def calculate_indicators(df_lower, df_1h):
             st.iloc[i] =  1 if close.iloc[i] > final_ub.iloc[i] else -1
     df_lower["ST_Trend"] = st
 
-    # --- ADX(14) Wilder — matches Pine's ta.dmi(14,14) ---
     up_move   = high - high.shift(1)
     down_move = low.shift(1) - low
     plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
@@ -392,22 +388,15 @@ def calculate_indicators(df_lower, df_1h):
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     df_lower["ADX"] = dx.ewm(alpha=1/14, adjust=False).mean()
 
-    # --- Body ratio — matches Pine's body_ratio ---
     df_lower["BodyRatio"] = (close - open_p).abs() / np.maximum(high - low, 0.0001)
     return df_lower
 
 def drop_unclosed_candles(df, interval_str, safety_margin_seconds=5):
     """
-    Remove any trailing candle that hasn't fully closed yet.
-
-    A bar labelled T on a 5m feed covers [T, T+5min) and closes at T+5min.
-    We require the bar to have closed at least `safety_margin_seconds` ago so
-    the provider has finalised it.
-
-    An earlier version used a +2s tolerance, which counter-intuitively
-    allowed a bar to be treated as closed 2 SECONDS BEFORE its real close —
-    during which the provider may still be updating it, producing phantom
-    flips on partial data.
+    Require a bar to have closed at least `safety_margin_seconds` ago, so the
+    provider has finalised it. Do NOT use a positive tolerance (a prior
+    version allowed bars to be treated as closed 2s BEFORE their real close,
+    producing phantom flips on partial data).
     """
     if df.empty:
         return df, 0
@@ -504,10 +493,6 @@ def log_decision(line):
 
 # ------------------------------------------------------------- FETCH HELPERS
 def fetch_with_fallback(name, cfg, interval):
-    """
-    Try the primary source first, then the fallback if configured.
-    Returns (df_lower, df_1h, effective_source) or raises.
-    """
     source = cfg["source"]
     ticker = cfg["ticker"]
     fallback = cfg.get("fallback")
@@ -579,7 +564,6 @@ def run_scanner():
                   f"({interval}: {len(df_lower)}, 1h: {len(df_1h)})")
             continue
 
-        # Data-age diagnostic: how long ago did the newest CLOSED bar close?
         last_open = df_lower.index[-1]
         if last_open.tzinfo is None:
             last_open = last_open.tz_localize("UTC")
