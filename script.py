@@ -6,23 +6,20 @@
 #   consolidating (ADX<15) forces LOW · tier 3=HIGH, 2=MEDIUM, else LOW ·
 #   SL = 3-bar swing before signal · TP1=1R · TP2=2R.
 #
-# Round 9 (this version):
-#   - NDX now sources from biquote (MetaTrader 5 feed, symbol USTEC = US Tech
-#     100 Index CFD). This trades ~24h including the Asian session and is a
-#     far closer match to the OANDA:XAUUSD-style chart than QQQ (which is a
-#     US-hours ETF and returned a stale 12h candle during Asian hours).
-#     Twelve Data's "NDX" is paid-tier-only; "OANDA:NAS100USD" 404'd; QQQ
-#     doesn't trade during the Asian window. USTEC solves all three at once.
-#   - AUTOMATIC FALLBACK: if biquote fails to fetch (package error, symbol
-#     not currently live on the MT5 feed, network issue), NDX silently falls
-#     back to yfinance's NQ=F — the 10-15 min delayed CME Nasdaq future.
-#     Worst case: you still get an NDX alert, just late. Best case: real-time
-#     CFD data matching the chart.
-#   - biquote is called via runtime introspection so the exact method name
-#     and argument signature are discovered rather than assumed; the Actions
-#     log prints which method it used, so a future API change is diagnosable
-#     in one line.
-#   - XAUUSD stays on Twelve Data ("XAU/USD", spot gold) — working well.
+# Round 10 (this version):
+#   - drop_unclosed_candles() tolerance was backwards: `now + 2s` allowed a
+#     bar to be treated as closed 2 SECONDS BEFORE its real close, during
+#     which the provider may still be updating it. This produced phantom
+#     flips on partial data (e.g. the SELL @ 10:50 that wasn't on the chart).
+#     Now requires the bar to have closed at least 5 seconds AGO.
+#   - biquote interval argument fixed: biquote's ohlc() expects '5m'/'1h'
+#     (yfinance-style), NOT 'M5'/'H1' (MT5-style). The MT5 format was being
+#     silently rejected, so biquote fell back to its 1h default → the
+#     timeframe-verification net correctly rejected it and fell back to
+#     yfinance. Now passes '5m' first, MT5 format only as a last resort.
+#   - Data age calculation uses the bar's CLOSE time (last_open + bar_len),
+#     so it's always a small positive number on a live feed.
+#   - Added inspect import for the biquote signature logging.
 # ==============================================================================
 
 import os
@@ -87,8 +84,6 @@ def to_mt5_interval(s):
     return f"H{n}" if unit == "h" else f"M{n}"
 
 # ------------------------------------------------------------------- SYMBOLS
-# Each symbol may have a "fallback" dict. If the primary fetch raises, the
-# fallback is attempted before the symbol is skipped for this run.
 SYMBOLS = {
     "NDX": {
         "ticker": "USTEC", "session": "ASIAN", "interval": "5m",
@@ -170,50 +165,45 @@ def fetch_twelvedata_series(symbol, interval, outputsize=300):
         df[c] = df[c].astype(float)
     return df[["Open", "High", "Low", "Close"]]
 
+# ------------------------------------------------------------- BIQUOTE (MT5)
 def fetch_biquote_series(symbol, interval_str, limit=300):
     """
     Fetch OHLC candles from biquote (MetaTrader 5 broker feed). Verified
-    against biquote 0.3.0, which uses an `ohlc` method returning columns
-    named openTime/Open/High/Low/Close/volume/tickVolume/isOpen.
+    against biquote 0.3.0: ohlc signature is
+    (symbol, interval='1h', limit=100, from_=None, to=None) — interval is in
+    the yfinance/Twelve Data format ('5m', '15m', '1h'), NOT the MT5 format
+    ('M5', 'M15', 'H1'). MT5 format is silently rejected, which causes
+    biquote to fall back to its 1h default.
     """
     if not BIQUOTE_AVAILABLE:
         raise RuntimeError("biquote package not installed / not importable")
 
     bq = Biquote()
-    mt5_interval = to_mt5_interval(interval_str)
-
-    # --- Discover the candles method -------------------------------------
-    candidates = ["ohlc", "candles", "get_candles", "history",
-                  "get_history", "rates", "get_rates"]
-    method = None
-    used_name = None
-    for mn in candidates:
-        if hasattr(bq, mn) and callable(getattr(bq, mn)):
-            method = getattr(bq, mn)
-            used_name = mn
-            break
-    if method is None:
+    method = getattr(bq, "ohlc", None)
+    if method is None or not callable(method):
         available = [m for m in dir(bq) if not m.startswith("_")]
-        raise RuntimeError(f"biquote: no candles method found. Available: {available}")
+        raise RuntimeError(f"biquote: no ohlc method. Available: {available}")
 
-    # Log the real signature so future API changes are diagnosable in one run.
     try:
-        print(f"[biquote] {used_name} signature: {inspect.signature(method)}")
+        print(f"[biquote] ohlc signature: {inspect.signature(method)}")
     except Exception:
         pass
 
-    # --- Try many signatures: kwargs first, then positional --------------
+    # Correct format first, alternatives as safety net.
     attempts = [
-        ("symbol=,timeframe=,limit=", lambda: method(symbol=symbol, timeframe=mt5_interval, limit=limit)),
-        ("symbol=,timeframe=,count=", lambda: method(symbol=symbol, timeframe=mt5_interval, count=limit)),
-        ("symbol=,interval=,limit=",  lambda: method(symbol=symbol, interval=mt5_interval, limit=limit)),
-        ("symbol=,interval=,count=",  lambda: method(symbol=symbol, interval=mt5_interval, count=limit)),
-        ("symbol=,timeframe=",        lambda: method(symbol=symbol, timeframe=mt5_interval)),
-        ("symbol=,interval=",         lambda: method(symbol=symbol, interval=mt5_interval)),
-        ("symbol,M5,limit",           lambda: method(symbol, mt5_interval, limit)),
-        ("symbol,M5",                 lambda: method(symbol, mt5_interval)),
-        ("symbol=",                   lambda: method(symbol=symbol)),
-        ("symbol",                    lambda: method(symbol)),
+        ("symbol=,interval=,limit=",
+            lambda: method(symbol=symbol, interval=interval_str, limit=limit)),
+        ("symbol=,interval=",
+            lambda: method(symbol=symbol, interval=interval_str)),
+        ("symbol,interval,limit",
+            lambda: method(symbol, interval_str, limit)),
+        ("symbol=,interval=,limit=,from_=None",
+            lambda: method(symbol=symbol, interval=interval_str, limit=limit,
+                           from_=None)),
+        ("symbol,M5,limit",
+            lambda: method(symbol, to_mt5_interval(interval_str), limit)),
+        ("symbol=",
+            lambda: method(symbol=symbol)),
     ]
     result = None
     last_err = None
@@ -223,105 +213,78 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
             result = fn()
             used_desc = desc
             break
-        except TypeError as e:
-            last_err = e
-            continue
         except Exception as e:
             last_err = e
             continue
     if result is None:
-        raise RuntimeError(
-            f"biquote: '{used_name}' rejected all attempts. Last error: {last_err}")
+        raise RuntimeError(f"biquote: ohlc rejected all attempts. Last: {last_err}")
 
-    print(f"[biquote] {symbol} {mt5_interval}: {used_name} succeeded via ({used_desc})")
+    print(f"[biquote] {symbol} {interval_str}: succeeded via ({used_desc})")
 
-    # --- Normalise to a DataFrame ----------------------------------------
+    # ---- Normalise to DataFrame ----------------------------------------
     if isinstance(result, pd.DataFrame):
         df = result.copy()
+    elif isinstance(result, list):
+        df = pd.DataFrame(result)
     elif isinstance(result, dict):
         payload = result
-        for k in ("data", "candles", "values", "result", "rates", "ohlc"):
+        for k in ("data", "candles", "values", "result", "ohlc"):
             if k in payload and isinstance(payload[k], (list, dict)):
                 payload = payload[k]
                 break
         df = pd.DataFrame(payload)
-    elif isinstance(result, list):
-        df = pd.DataFrame(result)
     else:
         raise RuntimeError(f"biquote: unexpected return type {type(result)}")
 
     if df.empty:
         raise RuntimeError(f"biquote: empty result for {symbol}")
 
-    print(f"[biquote] columns: {list(df.columns)}, rows={len(df)}")
-    if len(df) > 0:
-        print(f"[biquote] first row: {df.iloc[0].to_dict()}")
-
-    # --- Rename columns --------------------------------------------------
-    # biquote 0.3.0 uses 'openTime'. Include MT5 and other common variants.
     col_lower = {c.lower(): c for c in df.columns}
     rename_map = {}
-
-    time_candidates = ["opentime", "open_time", "time", "timestamp",
-                       "datetime", "date", "starttime", "start_time", "t"]
-    for tc in time_candidates:
+    for tc in ["opentime", "open_time", "time", "timestamp",
+               "datetime", "date", "t"]:
         if tc in col_lower and col_lower[tc] not in rename_map:
             rename_map[col_lower[tc]] = "_t"
             break
-
     for src, dst in (("open", "Open"), ("o", "Open"),
                      ("high", "High"), ("h", "High"),
                      ("low", "Low"),  ("l", "Low"),
                      ("close", "Close"), ("c", "Close")):
         if src in col_lower and col_lower[src] not in rename_map:
             rename_map[col_lower[src]] = dst
-
     df = df.rename(columns=rename_map)
 
     if "_t" not in df.columns:
-        raise RuntimeError(
-            f"biquote: no timestamp column. Columns: {list(df.columns)}")
+        raise RuntimeError(f"biquote: no timestamp. Columns: {list(df.columns)}")
 
-    # --- Parse timestamps (MT5 uses ms; be tolerant of s/ISO too) --------
     t = df["_t"]
     if pd.api.types.is_numeric_dtype(t):
         v = float(t.iloc[0])
-        if v > 1e12:                     # milliseconds
-            df["_t"] = pd.to_datetime(t, unit="ms", utc=True)
-        elif v > 1e9:                    # seconds
-            df["_t"] = pd.to_datetime(t, unit="s", utc=True)
-        else:
-            raise RuntimeError(f"biquote: uninterpretable timestamp value: {v}")
+        unit = "ms" if v > 1e12 else "s"
+        df["_t"] = pd.to_datetime(t, unit=unit, utc=True)
     else:
         df["_t"] = pd.to_datetime(t, utc=True)
 
     df = df.set_index("_t").sort_index()
     for c in ["Open", "High", "Low", "Close"]:
         if c not in df.columns:
-            raise RuntimeError(
-                f"biquote: missing '{c}'. Columns: {list(df.columns)}")
+            raise RuntimeError(f"biquote: missing '{c}'. Have: {list(df.columns)}")
         df[c] = df[c].astype(float)
-
     df = df[["Open", "High", "Low", "Close"]].tail(limit)
 
-    # --- Timeframe verification ------------------------------------------
-    # If biquote ignored our interval argument and returned a default (M1,
-    # M15, etc.), the median gap between bars will reveal it. Log it so a
-    # silent wrong-timeframe bug becomes visible in the first run.
+    # ---- Timeframe verification ----------------------------------------
+    # If biquote silently ignored the interval argument and returned its 1h
+    # default, the median gap between bars reveals it. Reject on mismatch —
+    # Supertrend on 1h is not the same signal as Supertrend on 5m.
     if len(df) >= 3:
         gaps = df.index.to_series().diff().dropna()
         median_min = gaps.median().total_seconds() / 60
         expected = interval_minutes(interval_str)
-        tag = "OK" if abs(median_min - expected) < 0.5 else "MISMATCH"
-        print(f"[biquote] bar interval: {median_min:.1f} min "
-              f"(expected {expected}) — {tag}")
         if abs(median_min - expected) >= 0.5:
-            print(f"[biquote] WARNING: biquote ignored our timeframe argument. "
-                  f"Signals would be computed on the wrong timeframe. "
-                  f"Rejecting this fetch and falling back.")
             raise RuntimeError(
                 f"biquote returned {median_min:.0f}min bars instead of "
                 f"{expected}min — wrong timeframe")
+        print(f"[biquote] verified {median_min:.1f}min bars ({len(df)} rows)")
 
     return df
 
@@ -385,6 +348,7 @@ def calculate_indicators(df_lower, df_1h):
     high, low, close, open_p = (df_lower["High"], df_lower["Low"],
                                 df_lower["Close"], df_lower["Open"])
 
+    # --- Supertrend(10, 3.0) — bar-for-bar match to the Pine ---
     tr = pd.concat([high - low,
                     (high - close.shift(1)).abs(),
                     (low  - close.shift(1)).abs()], axis=1).max(axis=1)
@@ -415,6 +379,7 @@ def calculate_indicators(df_lower, df_1h):
             st.iloc[i] =  1 if close.iloc[i] > final_ub.iloc[i] else -1
     df_lower["ST_Trend"] = st
 
+    # --- ADX(14) Wilder — matches Pine's ta.dmi(14,14) ---
     up_move   = high - high.shift(1)
     down_move = low.shift(1) - low
     plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
@@ -427,10 +392,23 @@ def calculate_indicators(df_lower, df_1h):
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     df_lower["ADX"] = dx.ewm(alpha=1/14, adjust=False).mean()
 
+    # --- Body ratio — matches Pine's body_ratio ---
     df_lower["BodyRatio"] = (close - open_p).abs() / np.maximum(high - low, 0.0001)
     return df_lower
 
-def drop_unclosed_candles(df, interval_str, tolerance_seconds=2):
+def drop_unclosed_candles(df, interval_str, safety_margin_seconds=5):
+    """
+    Remove any trailing candle that hasn't fully closed yet.
+
+    A bar labelled T on a 5m feed covers [T, T+5min) and closes at T+5min.
+    We require the bar to have closed at least `safety_margin_seconds` ago so
+    the provider has finalised it.
+
+    An earlier version used a +2s tolerance, which counter-intuitively
+    allowed a bar to be treated as closed 2 SECONDS BEFORE its real close —
+    during which the provider may still be updating it, producing phantom
+    flips on partial data.
+    """
     if df.empty:
         return df, 0
     idx = df.index
@@ -438,7 +416,8 @@ def drop_unclosed_candles(df, interval_str, tolerance_seconds=2):
         idx = idx.tz_localize("UTC")
     bar_len = pd.Timedelta(minutes=interval_minutes(interval_str))
     now_utc = pd.Timestamp(datetime.now(pytz.UTC))
-    closed = (idx + bar_len) <= (now_utc + pd.Timedelta(seconds=tolerance_seconds))
+    cutoff = now_utc - pd.Timedelta(seconds=safety_margin_seconds)
+    closed = (idx + bar_len) <= cutoff
     return df[closed], int((~closed).sum())
 
 def find_recent_flip(df, lookback):
@@ -600,12 +579,12 @@ def run_scanner():
                   f"({interval}: {len(df_lower)}, 1h: {len(df_1h)})")
             continue
 
+        # Data-age diagnostic: how long ago did the newest CLOSED bar close?
         last_open = df_lower.index[-1]
         if last_open.tzinfo is None:
             last_open = last_open.tz_localize("UTC")
-        age_min = (pd.Timestamp(datetime.now(pytz.UTC))
-                   - (last_open + pd.Timedelta(minutes=interval_minutes(interval)))
-                   ).total_seconds() / 60
+        close_time = last_open + pd.Timedelta(minutes=interval_minutes(interval))
+        age_min = (pd.Timestamp(datetime.now(pytz.UTC)) - close_time).total_seconds() / 60
         stale = age_min > interval_minutes(interval) + 1.5
         print(f"[{name}] Data age: {age_min:.1f} min "
               f"({'STALE — provider feed is behind' if stale else 'OK, live'}).")
