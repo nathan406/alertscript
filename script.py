@@ -73,7 +73,7 @@ def to_twelvedata_interval(s):
 
 # ------------------------------------------------------------------- SYMBOLS
 SYMBOLS = {
-    "NDX":    {"ticker": "NDX",     "session": "ASIAN",    "interval": "5m",
+    "NDX":    {"ticker": "QQQ",    "session": "ASIAN",    "interval": "5m",
                "source": "twelvedata"},
     "XAUUSD": {"ticker": "XAU/USD", "session": "NEW_YORK", "interval": "5m",
                "source": "twelvedata"},
