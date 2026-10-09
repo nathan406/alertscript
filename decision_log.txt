@@ -64,3 +64,4 @@
 2026-10-09 07:00:22 CAT | XAUUSD | SELL flip @ 2026-10-09 06:50 CAT | IN SESSION, tier=MEDIUM (score=2/3) | dispatching new-trade alert
 2026-10-09 07:00:24 CAT | XAUUSD | SELL flip @ 2026-10-09 06:45 CAT | INVALIDATED old SELL trade (entry=4177.36) | manual-close alert sent
 2026-10-09 07:00:24 CAT | XAUUSD | SELL flip @ 2026-10-09 06:45 CAT | OUT OF SESSION (NEW_YORK) | no alert, tier not scored
+2026-10-09 07:05:22 CAT | XAUUSD | BUY flip @ 2026-10-09 07:00 CAT | IN SESSION, tier=HIGH (score=3/3) | dispatching new-trade alert
