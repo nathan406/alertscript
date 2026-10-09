@@ -6,22 +6,23 @@
 #   consolidating (ADX<15) forces LOW · tier 3=HIGH, 2=MEDIUM, else LOW ·
 #   SL = 3-bar swing before signal · TP1=1R · TP2=2R.
 #
-# Round 8 (this version):
-#   - BOTH symbols now on Twelve Data. Free tier, 800 credits/day, no card.
-#     XAUUSD: "XAU/USD" (genuine spot gold — matches the user's OANDA chart
-#     far more closely than PAXG-USD ever could; the PAXG experiment showed
-#     the flip firing 25 min early on the wrong candle, which is exactly the
-#     class of error that destroys a statistical edge).
-#     NDX: "NDX" (Nasdaq 100 index). Fixes Yahoo's chronic 5-15 min stale
-#     feed that was silently hiding NDX flips.
-#     Credit budget: 288 lower-TF calls/symbol/day + 24 hourly HTF calls/
-#     symbol/day = ~624/day total, safely under the 800/day cap.
-#   - Per-symbol HTF cache (previously XAU-only), keyed by symbol name.
-#   - min_body_ratio 0.40 -> 0.50 (matches Pine default).
-#   - SL swing lookback 5 -> 3 (matches Pine scalp_lookback default).
-#   - File de-duplicated (was two copies concatenated).
-#   - "Close Manually" invalidation notification removed entirely.
-#   - One setup per session per symbol.
+# Round 9 (this version):
+#   - NDX now sources from biquote (MetaTrader 5 feed, symbol USTEC = US Tech
+#     100 Index CFD). This trades ~24h including the Asian session and is a
+#     far closer match to the OANDA:XAUUSD-style chart than QQQ (which is a
+#     US-hours ETF and returned a stale 12h candle during Asian hours).
+#     Twelve Data's "NDX" is paid-tier-only; "OANDA:NAS100USD" 404'd; QQQ
+#     doesn't trade during the Asian window. USTEC solves all three at once.
+#   - AUTOMATIC FALLBACK: if biquote fails to fetch (package error, symbol
+#     not currently live on the MT5 feed, network issue), NDX silently falls
+#     back to yfinance's NQ=F — the 10-15 min delayed CME Nasdaq future.
+#     Worst case: you still get an NDX alert, just late. Best case: real-time
+#     CFD data matching the chart.
+#   - biquote is called via runtime introspection so the exact method name
+#     and argument signature are discovered rather than assumed; the Actions
+#     log prints which method it used, so a future API change is diagnosable
+#     in one line.
+#   - XAUUSD stays on Twelve Data ("XAU/USD", spot gold) — working well.
 # ==============================================================================
 
 import os
@@ -32,7 +33,14 @@ from datetime import datetime
 import pytz
 import numpy as np
 import pandas as pd
-import yfinance as yf  # kept only as a fallback; not used by SYMBOLS below
+import yfinance as yf
+
+try:
+    from biquote import Biquote
+    BIQUOTE_AVAILABLE = True
+except Exception as _e:
+    BIQUOTE_AVAILABLE = False
+    print(f"[CONFIG] biquote not importable: {_e}")
 
 # ------------------------------------------------------------------- CONFIG
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -49,18 +57,18 @@ for _n, _v in [("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL),
               f"and the env block in main.yml.")
 
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
-HTF_CACHE_FILE = "htf_cache.json"          # per-symbol 1h HTF cache
+HTF_CACHE_FILE = "htf_cache.json"
 STATE_FILE     = "active_trades.json"
 ZAMBIA_TZ      = pytz.timezone("Africa/Lusaka")
 
-FLIP_LOOKBACK_MINUTES = 120                # 2h safety net vs delayed runs
+FLIP_LOOKBACK_MINUTES = 120
 
-# ---- Pine-matching thresholds (do NOT change without changing the chart too)
-ADX_STRONG        = 20.0   # adx_min
-ADX_CONSOLIDATION = 15.0   # consolidation_adx_max
-BODY_STRONG       = 0.50   # min_body_ratio
-SL_SWING_LOOKBACK = 3      # scalp_lookback
-SL_BUFFER         = 0.0    # scalp_sl_buffer
+# ---- Pine-matching thresholds
+ADX_STRONG        = 20.0
+ADX_CONSOLIDATION = 15.0
+BODY_STRONG       = 0.50
+SL_SWING_LOOKBACK = 3
+SL_BUFFER         = 0.0
 
 def interval_minutes(s):
     return int(s.rstrip("m"))
@@ -71,10 +79,25 @@ def lookback_bars_for(s):
 def to_twelvedata_interval(s):
     return f"{interval_minutes(s)}min"
 
+def to_mt5_interval(s):
+    """'5m' -> 'M5', '1h' -> 'H1' (MetaTrader 5 timeframe codes)."""
+    n = interval_minutes(s)
+    unit = s[-1].lower()
+    return f"H{n}" if unit == "h" else f"M{n}"
+
 # ------------------------------------------------------------------- SYMBOLS
+# Each symbol may have a "fallback" dict. If the primary fetch raises, the
+# fallback is attempted before the symbol is skipped for this run.
 SYMBOLS = {
-    "NDX":    {"ticker": "OANDA:NAS100USD", "session": "ASIAN",    "interval": "5m", "source": "twelvedata"},
-    "XAUUSD": {"ticker": "XAU/USD",         "session": "NEW_YORK", "interval": "5m", "source": "twelvedata"},
+    "NDX": {
+        "ticker": "USTEC", "session": "ASIAN", "interval": "5m",
+        "source": "biquote",
+        "fallback": {"source": "yfinance", "ticker": "NQ=F"},
+    },
+    "XAUUSD": {
+        "ticker": "XAU/USD", "session": "NEW_YORK", "interval": "5m",
+        "source": "twelvedata",
+    },
 }
 
 # ------------------------------------------------------------------- MESSAGES
@@ -128,27 +151,15 @@ def session_key_for(cat_dt, session_type):
 
 # ------------------------------------------------------------- TWELVE DATA
 def fetch_twelvedata_series(symbol, interval, outputsize=300):
-    """
-    Fetch a time series from Twelve Data and return it shaped like yfinance:
-    UTC-aware DatetimeIndex, Open/High/Low/Close, oldest-to-newest.
-    """
     params = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": outputsize,
-        "timezone": "UTC",
-        "order": "ASC",
-        "apikey": TWELVE_DATA_API_KEY,
+        "symbol": symbol, "interval": interval, "outputsize": outputsize,
+        "timezone": "UTC", "order": "ASC", "apikey": TWELVE_DATA_API_KEY,
     }
     r = requests.get(f"{TWELVE_DATA_BASE_URL}/time_series",
                      params=params, timeout=20)
     d = r.json()
-
-    # Twelve Data returns {"status":"error","message":"..."} on failure,
-    # including "you have run out of API credits" — surface that clearly.
     if d.get("status") == "error" or "values" not in d:
         raise RuntimeError(f"Twelve Data error for {symbol} ({interval}): {d}")
-
     df = pd.DataFrame(d["values"])
     df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
     df = df.set_index("datetime").sort_index()
@@ -157,6 +168,117 @@ def fetch_twelvedata_series(symbol, interval, outputsize=300):
     for c in ["Open", "High", "Low", "Close"]:
         df[c] = df[c].astype(float)
     return df[["Open", "High", "Low", "Close"]]
+
+# ------------------------------------------------------------- BIQUOTE (MT5)
+def fetch_biquote_series(symbol, interval_str, limit=300):
+    """
+    Fetch OHLC candles from biquote (MetaTrader 5 broker feed) and return a
+    DataFrame shaped like the other fetchers: UTC-aware DatetimeIndex,
+    Open/High/Low/Close, oldest-to-newest.
+
+    The biquote package exposes a small API; rather than hardcoding a method
+    name that may not exist in future versions, we introspect at runtime and
+    try the well-known candidates. The log prints which method and which
+    argument signature actually worked, so a future API change is diagnosable
+    from a single Actions run instead of a debug session.
+    """
+    if not BIQUOTE_AVAILABLE:
+        raise RuntimeError("biquote package not installed / not importable")
+
+    bq = Biquote()
+    mt5_interval = to_mt5_interval(interval_str)
+
+    # --- Discover the candles method --------------------------------------
+    candidates = ["candles", "get_candles", "history", "get_history",
+                  "ohlc", "get_ohlc", "rates", "get_rates"]
+    method = None
+    used_name = None
+    for mn in candidates:
+        if hasattr(bq, mn) and callable(getattr(bq, mn)):
+            method = getattr(bq, mn)
+            used_name = mn
+            break
+    if method is None:
+        available = [m for m in dir(bq) if not m.startswith("_")]
+        raise RuntimeError(f"biquote: no candles method found. Available: {available}")
+
+    # --- Try common argument signatures -----------------------------------
+    signature_variants = [
+        {"symbol": symbol, "interval": mt5_interval, "count": limit},
+        {"symbol": symbol, "timeframe": mt5_interval, "count": limit},
+        {"symbol": symbol, "interval": mt5_interval, "limit": limit},
+        {"symbol": symbol, "period": mt5_interval, "count": limit},
+        {"symbol": symbol, "interval": mt5_interval},
+        {"symbol": symbol},
+    ]
+    result = None
+    used_sig = None
+    last_err = None
+    for kwargs in signature_variants:
+        try:
+            result = method(**kwargs)
+            used_sig = list(kwargs.keys())
+            break
+        except TypeError as e:
+            last_err = e
+            continue
+        except Exception as e:
+            last_err = e
+            continue
+    if result is None:
+        raise RuntimeError(f"biquote: '{used_name}' rejected all signatures. "
+                           f"Last error: {last_err}")
+
+    print(f"[biquote] {symbol} {mt5_interval}: used '{used_name}' with args {used_sig}")
+
+    # --- Normalise to a DataFrame -----------------------------------------
+    if isinstance(result, pd.DataFrame):
+        df = result.copy()
+    elif isinstance(result, dict):
+        payload = result
+        for k in ("data", "candles", "values", "result", "rates"):
+            if k in payload and isinstance(payload[k], (list, dict)):
+                payload = payload[k]
+                break
+        df = pd.DataFrame(payload)
+    elif isinstance(result, list):
+        df = pd.DataFrame(result)
+    else:
+        raise RuntimeError(f"biquote: unexpected return type {type(result)}")
+
+    if df.empty:
+        raise RuntimeError(f"biquote: empty result for {symbol}")
+
+    # --- Rename columns to Open/High/Low/Close + timestamp -----------------
+    col_lower = {c.lower(): c for c in df.columns}
+    rename_map = {}
+    for src, dst in (("time", "_t"), ("timestamp", "_t"),
+                     ("datetime", "_t"), ("date", "_t"), ("t", "_t"),
+                     ("open", "Open"), ("o", "Open"),
+                     ("high", "High"), ("h", "High"),
+                     ("low",  "Low"),  ("l", "Low"),
+                     ("close","Close"),("c", "Close")):
+        if src in col_lower and col_lower[src] not in rename_map:
+            rename_map[col_lower[src]] = dst
+    df = df.rename(columns=rename_map)
+
+    if "_t" not in df.columns:
+        raise RuntimeError(f"biquote: no timestamp column. Columns: {list(df.columns)}")
+
+    t = df["_t"]
+    if pd.api.types.is_numeric_dtype(t):
+        # Heuristic: values > 10^11 are ms, else seconds.
+        unit = "ms" if float(t.iloc[0]) > 1e11 else "s"
+        df["_t"] = pd.to_datetime(t, unit=unit, utc=True)
+    else:
+        df["_t"] = pd.to_datetime(t, utc=True)
+
+    df = df.set_index("_t").sort_index()
+    for c in ["Open", "High", "Low", "Close"]:
+        if c not in df.columns:
+            raise RuntimeError(f"biquote: missing '{c}'. Columns: {list(df.columns)}")
+        df[c] = df[c].astype(float)
+    return df[["Open", "High", "Low", "Close"]].tail(limit)
 
 # ------------------------------------------------------------- HTF CACHE
 def load_htf_cache():
@@ -172,33 +294,26 @@ def save_htf_cache(c):
     with open(HTF_CACHE_FILE, "w") as f:
         json.dump(c, f, indent=2)
 
-def get_htf_df(symbol, cache_key, interval="1h", outputsize=200):
-    """
-    Return the 1h OHLC DataFrame for `symbol`, refetched from Twelve Data at
-    most once per hour and cached on disk between refreshes. 1h candles can't
-    change faster than once an hour anyway, so re-fetching every 5-minute
-    scan would just burn credits for identical data. This keeps total daily
-    usage around ~624 credits against the 800/day free cap.
-
-    Cache is keyed per symbol so two symbols don't overwrite each other.
-    """
+def get_htf_df(symbol, cache_key, interval="1h", outputsize=200,
+               source="twelvedata"):
     cache = load_htf_cache()
     now_utc = datetime.now(pytz.UTC)
     entry = cache.get(cache_key)
     cached_time = entry.get("fetched_at") if entry else None
-
     needs_refresh = cached_time is None
     if not needs_refresh:
         cached_dt = datetime.fromisoformat(cached_time)
         needs_refresh = (now_utc - cached_dt).total_seconds() >= 3600
 
     if needs_refresh:
-        print(f"[{symbol}] Refreshing Twelve Data {interval} HTF series.")
-        df_1h = fetch_twelvedata_series(symbol, interval, outputsize=outputsize)
+        print(f"[{symbol}] Refreshing {interval} HTF series (source={source}).")
+        if source == "biquote":
+            df_1h = fetch_biquote_series(symbol, interval, limit=outputsize)
+        else:
+            df_1h = fetch_twelvedata_series(symbol, interval, outputsize=outputsize)
         cache[cache_key] = {
             "fetched_at": now_utc.isoformat(),
-            "data": df_1h.reset_index().to_json(orient="records",
-                                                date_format="iso"),
+            "data": df_1h.reset_index().to_json(orient="records", date_format="iso"),
         }
         save_htf_cache(cache)
     else:
@@ -225,7 +340,6 @@ def calculate_indicators(df_lower, df_1h):
     high, low, close, open_p = (df_lower["High"], df_lower["Low"],
                                 df_lower["Close"], df_lower["Open"])
 
-    # --- Supertrend(10, 3.0) — bar-for-bar match to the Pine ---
     tr = pd.concat([high - low,
                     (high - close.shift(1)).abs(),
                     (low  - close.shift(1)).abs()], axis=1).max(axis=1)
@@ -256,7 +370,6 @@ def calculate_indicators(df_lower, df_1h):
             st.iloc[i] =  1 if close.iloc[i] > final_ub.iloc[i] else -1
     df_lower["ST_Trend"] = st
 
-    # --- ADX(14) Wilder — same as Pine's ta.dmi(14,14) ---
     up_move   = high - high.shift(1)
     down_move = low.shift(1) - low
     plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
@@ -269,16 +382,10 @@ def calculate_indicators(df_lower, df_1h):
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     df_lower["ADX"] = dx.ewm(alpha=1/14, adjust=False).mean()
 
-    # --- Body ratio — matches Pine's body_ratio ---
     df_lower["BodyRatio"] = (close - open_p).abs() / np.maximum(high - low, 0.0001)
     return df_lower
 
 def drop_unclosed_candles(df, interval_str, tolerance_seconds=2):
-    """
-    Remove any trailing candle that hasn't fully closed yet. Pine confirms
-    signals only on closed bars (barstate.isconfirmed); without this, the
-    in-progress candle can produce a flip that vanishes by its close.
-    """
     if df.empty:
         return df, 0
     idx = df.index
@@ -290,12 +397,6 @@ def drop_unclosed_candles(df, interval_str, tolerance_seconds=2):
     return df[closed], int((~closed).sum())
 
 def find_recent_flip(df, lookback):
-    """
-    Scan the last `lookback` closed bars for a Supertrend flip. Returns
-    (index, "BUY"/"SELL", timestamp) of the MOST RECENT flip in the window,
-    or (None, None, None). The lookback window means a delayed/skipped run
-    can still pick the flip up a bar or two later.
-    """
     t = df["ST_Trend"]
     n = len(t)
     start = max(1, n - lookback)
@@ -312,9 +413,7 @@ def send_notification(title, body, color_code=3447003):
         payload = {
             "content": "@everyone",
             "embeds": [{
-                "title": title,
-                "description": body,
-                "color": color_code,
+                "title": title, "description": body, "color": color_code,
                 "footer": {"text": "Trend Targets Pro • Mandalorian Warrior Creed"},
             }],
         }
@@ -379,6 +478,52 @@ def log_decision(line):
     except Exception as e:
         print(f"[DECISION LOG] write error: {e}")
 
+# ------------------------------------------------------------- FETCH HELPERS
+def fetch_with_fallback(name, cfg, interval):
+    """
+    Try the primary source first, then the fallback if configured.
+    Returns (df_lower, df_1h, effective_source) or raises.
+    """
+    source = cfg["source"]
+    ticker = cfg["ticker"]
+    fallback = cfg.get("fallback")
+
+    def _fetch(src, tkr):
+        if src == "twelvedata":
+            return (fetch_twelvedata_series(tkr, to_twelvedata_interval(interval),
+                                            outputsize=300),
+                    get_htf_df(tkr, cache_key=f"{name}_1h", interval="1h",
+                               outputsize=200, source="twelvedata"),
+                    "twelvedata")
+        if src == "biquote":
+            return (fetch_biquote_series(tkr, interval, limit=300),
+                    get_htf_df(tkr, cache_key=f"{name}_1h", interval="1h",
+                               outputsize=200, source="biquote"),
+                    "biquote")
+        if src == "yfinance":
+            df_lower = yf.download(tkr, period="5d", interval=interval,
+                                   progress=False)
+            df_1h    = yf.download(tkr, period="10d", interval="1h",
+                                   progress=False)
+            if isinstance(df_lower.columns, pd.MultiIndex):
+                df_lower.columns = df_lower.columns.get_level_values(0)
+            if isinstance(df_1h.columns, pd.MultiIndex):
+                df_1h.columns = df_1h.columns.get_level_values(0)
+            return df_lower, df_1h, "yfinance"
+        raise RuntimeError(f"unknown source '{src}'")
+
+    try:
+        df_lower, df_1h, eff = _fetch(source, ticker)
+        return df_lower, df_1h, eff
+    except Exception as e:
+        print(f"[{name}] Primary fetch ({source}/{ticker}) failed: {e}")
+        if not fallback:
+            raise
+        print(f"[{name}] Trying fallback "
+              f"({fallback['source']}/{fallback['ticker']})...")
+        df_lower, df_1h, _ = _fetch(fallback["source"], fallback["ticker"])
+        return df_lower, df_1h, fallback["source"]
+
 # ------------------------------------------------------------- SCANNER
 def run_scanner():
     state = load_state()
@@ -386,39 +531,21 @@ def run_scanner():
           f"{datetime.now(ZAMBIA_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')} =====")
 
     for name, cfg in SYMBOLS.items():
-        ticker       = cfg["ticker"]
         session_type = cfg["session"]
-        source       = cfg["source"]
         interval     = cfg["interval"]
         lookback_bars = lookback_bars_for(interval)
 
-        print(f"\n--- {name} ({ticker}, session={session_type}, "
-              f"source={source}, interval={interval}) ---")
+        print(f"\n--- {name} ({cfg['ticker']}, session={session_type}, "
+              f"source={cfg['source']}, interval={interval}) ---")
 
-        # ---------------------------------------------------- DATA FETCH
         try:
-            if source == "twelvedata":
-                df_lower = fetch_twelvedata_series(
-                    ticker, to_twelvedata_interval(interval), outputsize=300)
-                df_1h = get_htf_df(ticker, cache_key=f"{name}_1h",
-                                   interval="1h", outputsize=200)
-            elif source == "yfinance":                       # fallback only
-                df_lower = yf.download(ticker, period="5d",
-                                       interval=interval, progress=False)
-                df_1h    = yf.download(ticker, period="10d",
-                                       interval="1h", progress=False)
-                if isinstance(df_lower.columns, pd.MultiIndex):
-                    df_lower.columns = df_lower.columns.get_level_values(0)
-                if isinstance(df_1h.columns, pd.MultiIndex):
-                    df_1h.columns = df_1h.columns.get_level_values(0)
-            else:
-                print(f"[{name}] SKIPPED — unknown source '{source}'")
-                continue
+            df_lower, df_1h, effective = fetch_with_fallback(name, cfg, interval)
+            if effective != cfg["source"]:
+                print(f"[{name}] Using FALLBACK source: {effective}")
         except Exception as e:
-            print(f"[{name}] Download error: {e}")
+            print(f"[{name}] All fetches failed: {e}")
             continue
 
-        # Only ever act on CLOSED candles.
         df_lower, n_dropped = drop_unclosed_candles(df_lower, interval)
         if n_dropped:
             print(f"[{name}] Dropped {n_dropped} still-forming candle(s).")
@@ -428,7 +555,6 @@ def run_scanner():
                   f"({interval}: {len(df_lower)}, 1h: {len(df_1h)})")
             continue
 
-        # Feed freshness diagnostic.
         last_open = df_lower.index[-1]
         if last_open.tzinfo is None:
             last_open = last_open.tz_localize("UTC")
@@ -449,7 +575,7 @@ def run_scanner():
         high_p = float(df.iloc[-1]["High"])
         low_p  = float(df.iloc[-1]["Low"])
 
-        # ---------------------------------------------------- 1. MANAGE LIVE TRADE
+        # ---------------- 1. MANAGE LIVE TRADE ----------------
         if name in state:
             t = state[name]
             d, e, sl, tp1, tp2 = (t["direction"], t["entry"], t["sl"],
@@ -468,33 +594,27 @@ def run_scanner():
                         f"{random.choice(TP1_MESSAGES)}\n\n"
                         f"• *Entry:* `{e:.2f}`\n• *TP1:* `{tp1:.2f}`\n"
                         f"• *New SL:* `{e:.2f} (Break Even)`",
-                        color_code=65280,
-                    )
+                        color_code=65280)
                 elif t["tp1_hit"] and high_p >= tp2:
                     send_notification(
                         f"🚀 FULL TP2 HIT — {name} ({interval})",
                         f"{random.choice(TP2_MESSAGES)}\n\n"
                         f"• *Entry:* `{e:.2f}`\n• *TP2 (1:2):* `{tp2:.2f}`",
-                        color_code=65280,
-                    )
+                        color_code=65280)
                     closed = True
                 elif low_p <= (e if t["sl_moved_to_be"] else sl):
                     if t["sl_moved_to_be"]:
                         send_notification(
                             f"🛡️ BREAK EVEN HIT — {name}",
                             f"{random.choice(BE_HIT_MESSAGES)}\n\n"
-                            f"• *Entry/BE:* `{e:.2f}`",
-                            color_code=1752220,
-                        )
+                            f"• *Entry/BE:* `{e:.2f}`", color_code=1752220)
                     else:
                         send_notification(
                             f"🛑 STOP LOSS HIT — {name}",
                             f"{random.choice(SL_HIT_MESSAGES)}\n\n"
                             f"• *Entry:* `{e:.2f}`\n• *SL:* `{sl:.2f}`",
-                            color_code=15548997,
-                        )
+                            color_code=15548997)
                     closed = True
-
             elif d == "SELL":
                 if not t["tp1_hit"] and low_p <= tp1:
                     t["tp1_hit"] = True
@@ -505,31 +625,26 @@ def run_scanner():
                         f"{random.choice(TP1_MESSAGES)}\n\n"
                         f"• *Entry:* `{e:.2f}`\n• *TP1:* `{tp1:.2f}`\n"
                         f"• *New SL:* `{e:.2f} (Break Even)`",
-                        color_code=65280,
-                    )
+                        color_code=65280)
                 elif t["tp1_hit"] and low_p <= tp2:
                     send_notification(
                         f"🚀 FULL TP2 HIT — {name} ({interval})",
                         f"{random.choice(TP2_MESSAGES)}\n\n"
                         f"• *Entry:* `{e:.2f}`\n• *TP2 (1:2):* `{tp2:.2f}`",
-                        color_code=65280,
-                    )
+                        color_code=65280)
                     closed = True
                 elif high_p >= (e if t["sl_moved_to_be"] else sl):
                     if t["sl_moved_to_be"]:
                         send_notification(
                             f"🛡️ BREAK EVEN HIT — {name}",
                             f"{random.choice(BE_HIT_MESSAGES)}\n\n"
-                            f"• *Entry/BE:* `{e:.2f}`",
-                            color_code=1752220,
-                        )
+                            f"• *Entry/BE:* `{e:.2f}`", color_code=1752220)
                     else:
                         send_notification(
                             f"🛑 STOP LOSS HIT — {name}",
                             f"{random.choice(SL_HIT_MESSAGES)}\n\n"
                             f"• *Entry:* `{e:.2f}`\n• *SL:* `{sl:.2f}`",
-                            color_code=15548997,
-                        )
+                            color_code=15548997)
                     closed = True
 
             if closed:
@@ -537,7 +652,7 @@ def run_scanner():
                 save_state(state)
                 continue
 
-        # ---------------------------------------------------- 2. NEW SETUP?
+        # ---------------- 2. NEW SETUP? ----------------
         fi, direction, ftime = find_recent_flip(df, lookback=lookback_bars)
         if fi is None:
             print(f"[{name}] No Supertrend flip in last {lookback_bars} bars.")
@@ -548,21 +663,18 @@ def run_scanner():
         print(f"[{name}] Flip found: {direction} at "
               f"{ft_cat.strftime('%Y-%m-%d %H:%M %Z')} (CAT)")
 
-        # Deduplicate — never re-evaluate the same flip bar twice.
         if get_last_flip_seen(state, name) == ft_iso:
             print(f"[{name}] Flip already evaluated on a prior run — skipping.")
             continue
         set_last_flip_seen(state, name, ft_iso)
         save_state(state)
 
-        # Session gate — flip's own candle timestamp must be in-window.
         if not is_bar_in_session(ftime, session_type):
             log_decision(f"{name} | {direction} @ "
                          f"{ft_cat.strftime('%Y-%m-%d %H:%M CAT')} | "
                          f"OUT OF SESSION ({session_type})")
             continue
 
-        # One-setup-per-session gate.
         skey = session_key_for(ft_cat, session_type)
         if get_session_taken(state, name) == skey:
             log_decision(f"{name} | {direction} @ "
@@ -570,14 +682,12 @@ def run_scanner():
                          f"session {skey} already traded")
             continue
 
-        # Active-trade gate.
         if name in state:
             log_decision(f"{name} | {direction} @ "
                          f"{ft_cat.strftime('%Y-%m-%d %H:%M CAT')} | "
                          f"active trade still open")
             continue
 
-        # --- Score the flip exactly like Pine ---
         bar    = df.iloc[fi]
         entry  = float(bar["Close"])
         htf    = float(bar["HTF_EMA"])
@@ -591,14 +701,10 @@ def run_scanner():
         consol  = adx < ADX_CONSOLIDATION
 
         score = int(htf_ok) + int(adx_ok) + int(body_ok)
-        if consol:
-            tier = "LOW"
-        elif score == 3:
-            tier = "HIGH"
-        elif score == 2:
-            tier = "MEDIUM"
-        else:
-            tier = "LOW"
+        if consol:        tier = "LOW"
+        elif score == 3:  tier = "HIGH"
+        elif score == 2:  tier = "MEDIUM"
+        else:             tier = "LOW"
 
         print(f"[{name}] Score {score}/3 — HTF={htf_ok} "
               f"(close={entry:.2f} vs HTF EMA={htf:.2f}) | "
@@ -612,20 +718,17 @@ def run_scanner():
                          f"IN SESSION, tier=LOW (score={score}/3) | no alert")
             continue
 
-        # Lock the session in, build the trade, dispatch.
         set_session_taken(state, name, skey)
         log_decision(f"{name} | {direction} @ "
                      f"{ft_cat.strftime('%Y-%m-%d %H:%M CAT')} | "
                      f"IN SESSION, tier={tier} (score={score}/3) | "
-                     f"dispatching alert, session locked")
+                     f"dispatching alert, session locked (source={effective})")
 
-        # SL: swing of the SL_SWING_LOOKBACK bars before the signal bar.
         s = max(0, fi - SL_SWING_LOOKBACK)
         seg = df.iloc[s:fi]
         if seg.empty:
-            # Extremely rare (flip on bar 1) — fall back to signal bar's own range.
             seg = df.iloc[fi:fi+1]
-        sl_px = float(seg["Low"].min())  - SL_BUFFER if is_buy \
+        sl_px = float(seg["Low"].min()) - SL_BUFFER if is_buy \
                 else float(seg["High"].max()) + SL_BUFFER
 
         risk = abs(entry - sl_px) or entry * 0.001
@@ -643,6 +746,7 @@ def run_scanner():
                     else "MEDIUM PROBABILITY SETUP ⭐⭐")
         emoji = "⚔️ 🟢" if is_buy else "⚔️ 🔴"
         color = 5763719 if is_buy else 15548997
+        src_note = f"\n• *Data source:* `{effective}`"
 
         body_msg = (
             f"{emoji} *{direction} SIGNAL CONFIRMED on {name} ({interval})*\n"
@@ -651,7 +755,8 @@ def run_scanner():
             f"• *Stop Loss:* `{sl_px:.2f}`\n"
             f"• *TP1 (1:1 R/R):* `{tp1:.2f}`\n"
             f"• *TP2 (1:2 R/R):* `{tp2:.2f}`\n\n"
-            f"• *ADX:* `{adx:.1f}` | *Candle Body:* `{body*100:.1f}%`\n\n"
+            f"• *ADX:* `{adx:.1f}` | *Candle Body:* `{body*100:.1f}%`"
+            f"{src_note}\n\n"
             f"*Honor the risk rules and execute with courage. This is the way.*"
         )
         send_notification(f"🚨 TREND TARGETS PRO — {name}", body_msg,
