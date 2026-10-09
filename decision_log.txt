@@ -91,3 +91,6 @@
 2026-10-09 08:45:22 CAT | XAUUSD | BUY flip @ 2026-10-09 07:00 CAT | IN SESSION, tier=HIGH (score=3/3) | dispatching new-trade alert
 2026-10-09 08:45:24 CAT | XAUUSD | SELL flip @ 2026-10-09 08:00 CAT | INVALIDATED old BUY trade (entry=4187.52) | manual-close alert sent
 2026-10-09 08:45:24 CAT | XAUUSD | SELL flip @ 2026-10-09 08:00 CAT | OUT OF SESSION (NEW_YORK) | no alert, tier not scored
+2026-10-09 08:50:27 CAT | XAUUSD | BUY flip @ 2026-10-09 07:00 CAT | IN SESSION, tier=HIGH (score=3/3) | dispatching new-trade alert
+2026-10-09 08:50:30 CAT | XAUUSD | SELL flip @ 2026-10-09 08:00 CAT | INVALIDATED old BUY trade (entry=4187.52) | manual-close alert sent
+2026-10-09 08:50:30 CAT | XAUUSD | SELL flip @ 2026-10-09 08:00 CAT | OUT OF SESSION (NEW_YORK) | no alert, tier not scored
