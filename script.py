@@ -6,17 +6,12 @@
 #   consolidating (ADX<15) forces LOW · tier 3=HIGH, 2=MEDIUM, else LOW ·
 #   SL = 3-bar swing before signal · TP1=1R · TP2=2R.
 #
-# Round 11 (this version):
-#   - interval_minutes() fixed to handle 'h' as well as 'm'. biquote returns
-#     5m bars fine but crashes on int('1h') when fetching the 1h HTF series,
-#     silently forcing the whole NDX symbol to the yfinance fallback.
-#   - Everything else unchanged from Round 10.
-#
-# KNOWN LIMITATION (not a bug — architectural):
-#   Twelve Data's XAU/USD is spot gold but NOT byte-identical to OANDA:XAUUSD.
-#   Supertrend flips will occasionally land on a different candle than the
-#   user's chart. No free polling source avoids this. The only exact-match
-#   solution is to receive signals from TradingView itself via webhook.
+# Round 12 (this version):
+#   - HTF cache write now normalises the index name to 'datetime' before
+#     serialising. biquote returns an index called '_t'; the cache reader
+#     expects 'datetime'. The mismatch crashed the NDX 1h fetch after it had
+#     already succeeded, forcing a spurious fallback to yfinance on every run.
+#   - Everything else unchanged from Round 11.
 # ==============================================================================
 
 import os
@@ -68,8 +63,6 @@ SL_BUFFER         = 0.0
 def interval_minutes(s):
     """
     '5m' -> 5, '15m' -> 15, '1h' -> 60, '4h' -> 240.
-    Round 11: previously only handled 'm' suffix, which crashed on '1h'
-    (biquote's HTF fetch) with `invalid literal for int() with base 10: '1h'`.
     """
     s = s.strip().lower()
     if s.endswith("m"):
@@ -317,6 +310,10 @@ def get_htf_df(symbol, cache_key, interval="1h", outputsize=200,
             df_1h = fetch_biquote_series(symbol, interval, limit=outputsize)
         else:
             df_1h = fetch_twelvedata_series(symbol, interval, outputsize=outputsize)
+        # Normalise the index name so the JSON round-trip always produces a
+        # 'datetime' column, regardless of what the source called it
+        # (Twelve Data uses 'datetime', biquote uses '_t').
+        df_1h.index.name = "datetime"
         cache[cache_key] = {
             "fetched_at": now_utc.isoformat(),
             "data": df_1h.reset_index().to_json(orient="records", date_format="iso"),
