@@ -5,14 +5,5 @@
   },
   "_session_taken": {
     "NDX": "2026-10-12_ASIAN"
-  },
-  "NDX": {
-    "direction": "SELL",
-    "entry": 31013.95,
-    "sl": 31068.7,
-    "tp1": 30959.2,
-    "tp2": 30904.45,
-    "tp1_hit": false,
-    "sl_moved_to_be": false
   }
 }
