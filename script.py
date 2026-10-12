@@ -6,12 +6,12 @@
 #   consolidating (ADX<15) forces LOW · tier 3=HIGH, 2=MEDIUM, else LOW ·
 #   SL = 3-bar swing before signal · TP1=1R · TP2=2R.
 #
-# Round 12 (this version):
-#   - HTF cache write now normalises the index name to 'datetime' before
-#     serialising. biquote returns an index called '_t'; the cache reader
-#     expects 'datetime'. The mismatch crashed the NDX 1h fetch after it had
-#     already succeeded, forcing a spurious fallback to yfinance on every run.
-#   - Everything else unchanged from Round 11.
+# Round 13 (this version):
+#   - XAUUSD now pulls its data from biquote (MT5) instead of twelvedata,
+#     matching the feed your broker actually executes on. This eliminates
+#     the phantom-signal mismatch where twelvedata's candles disagreed with
+#     OANDA/TradingView by several dollars.
+#   - twelvedata retained as fallback so the bot still works if MT5 is down.
 # ==============================================================================
 
 import os
@@ -90,8 +90,14 @@ SYMBOLS = {
         "fallback": {"source": "yfinance", "ticker": "NQ=F"},
     },
     "XAUUSD": {
-        "ticker": "XAU/USD", "session": "NEW_YORK", "interval": "5m",
-        "source": "twelvedata",
+        # MT5 symbol for gold — matches the feed you execute on.
+        # If your broker uses a different symbol name (GOLD, XAUUSD.m,
+        # XAUUSDm, etc.), change "ticker" to match what shows in MT5's
+        # Market Watch. The bot will tell you in the logs if the symbol
+        # isn't found.
+        "ticker": "XAUUSD", "session": "NEW_YORK", "interval": "5m",
+        "source": "biquote",
+        "fallback": {"source": "twelvedata", "ticker": "XAU/USD"},
     },
 }
 
