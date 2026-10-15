@@ -174,3 +174,5 @@
 2026-10-15 02:35:29 CAT | NDX | BUY @ 2026-10-15 02:30 CAT | IN SESSION, tier=MEDIUM (score=2/3) | dispatching alert, session locked (source=biquote)
 2026-10-15 04:40:33 CAT | NDX | SELL @ 2026-10-15 04:35 CAT | session 2026-10-15_ASIAN already traded
 2026-10-15 06:25:24 CAT | NDX | BUY @ 2026-10-15 06:20 CAT | session 2026-10-15_ASIAN already traded
+2026-10-15 07:35:22 CAT | NDX | SELL @ 2026-10-15 07:30 CAT | session 2026-10-15_ASIAN already traded
+2026-10-15 07:35:23 CAT | XAUUSD | SELL @ 2026-10-15 07:30 CAT | OUT OF SESSION (NEW_YORK)
