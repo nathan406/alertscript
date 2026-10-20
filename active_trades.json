@@ -6,14 +6,5 @@
   "_session_taken": {
     "XAUUSD": "2026-10-19_NEW_YORK",
     "NDX": "2026-10-20_ASIAN"
-  },
-  "NDX": {
-    "direction": "BUY",
-    "entry": 29555.4,
-    "sl": 29487.65,
-    "tp1": 29623.15,
-    "tp2": 29690.9,
-    "tp1_hit": true,
-    "sl_moved_to_be": true
   }
 }
