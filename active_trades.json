@@ -1,10 +1,19 @@
 {
   "_meta": {
-    "XAUUSD": "2026-10-21T13:15:00+00:00",
+    "XAUUSD": "2026-10-21T14:00:00+00:00",
     "NDX": "2026-10-21T11:00:00+00:00"
   },
   "_session_taken": {
-    "XAUUSD": "2026-10-19_NEW_YORK",
+    "XAUUSD": "2026-10-21_NEW_YORK",
     "NDX": "2026-10-21_ASIAN"
+  },
+  "XAUUSD": {
+    "direction": "SELL",
+    "entry": 4126.854,
+    "sl": 4137.923,
+    "tp1": 4115.785000000001,
+    "tp2": 4104.716000000001,
+    "tp1_hit": false,
+    "sl_moved_to_be": false
   }
 }
