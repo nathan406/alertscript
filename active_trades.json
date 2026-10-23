@@ -13,7 +13,7 @@
     "sl": 4027.121,
     "tp1": 4000.4210000000003,
     "tp2": 3987.0710000000004,
-    "tp1_hit": false,
-    "sl_moved_to_be": false
+    "tp1_hit": true,
+    "sl_moved_to_be": true
   }
 }
