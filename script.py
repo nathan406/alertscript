@@ -137,7 +137,7 @@ def poll_telegram_commands():
         new_offset = max(new_offset, update_id + 1)
         msg = result.get("message", {})
         
-        # 6-MINUTE HARD LOCK: Prevents GitHub Actions from re-reading old messages
+        # 6-MINUTE HARD LOCK
         msg_time = msg.get("date", 0)
         if (time.time() - msg_time) > 360:
             continue
@@ -146,9 +146,13 @@ def poll_telegram_commands():
         chat_id = str(msg.get("chat", {}).get("id", ""))
 
         if chat_id != str(TELEGRAM_CHAT_ID): continue
+        if not text: continue
 
-        if text.startswith("/alert"):
-            parts = text.split()
+        # Split the message to get the exact command (e.g., "/alert")
+        parts = text.split()
+        command = parts[0].lower()
+
+        if command == "/alert":
             if len(parts) >= 3:
                 symbol = parts[1].upper()
                 try:
@@ -158,38 +162,45 @@ def poll_telegram_commands():
                     send_telegram(f"✅ Price Alert Set\n\nAlert set for *{symbol}* at *{price}*")
                 except ValueError:
                     send_telegram("❌ Invalid price. Usage: `/alert XAUUSD 1445.50`")
-            else: send_telegram("❌ Usage: `/alert SYMBOL PRICE`")
+            else:
+                send_telegram("❌ Usage: `/alert SYMBOL PRICE`")
                 
-        elif text.startswith("/remove"):
-            parts = text.split()
+        elif command == "/remove":
             if len(parts) >= 2:
                 symbol = parts[1].upper()
                 if symbol in alerts:
                     del alerts[symbol]
                     updated = True
                     send_telegram(f"🗑 Alert Removed for *{symbol}*")
-                else: send_telegram(f"ℹ️ No active alert for *{symbol}*")
+                else: 
+                    send_telegram(f"ℹ️ No active alert for *{symbol}*")
+            else:
+                send_telegram("❌ Usage: `/remove SYMBOL`")
                     
-        elif text.startswith("/alerts"):
+        elif command == "/alerts":
             if alerts:
                 lines = ["*Active Price Alerts:*"]
-                for s, a in alerts.items(): lines.append(f"• *{s}*: `{a['price']}`")
+                for s, a in alerts.items(): 
+                    lines.append(f"• *{s}*: `{a['price']}`")
                 send_telegram("\n".join(lines))
-            else: send_telegram("ℹ️ No active price alerts.")
+            else: 
+                send_telegram("ℹ️ No active price alerts.")
                 
-        elif text.startswith("/price"):
-            parts = text.split()
+        elif command == "/price":
             if len(parts) >= 2:
                 symbol = parts[1].upper()
                 try:
                     df = fetch_biquote_series(symbol, "1m", limit=2)
                     if not df.empty:
                         send_telegram(f"📊 *{symbol}* current price: `{df.iloc[-1]['Close']:.5f}`")
-                    else: send_telegram(f"❌ Could not fetch price for {symbol}")
-                except Exception as e: send_telegram(f"❌ Error: {e}")
-            else: send_telegram("❌ Usage: `/price SYMBOL`")
+                    else: 
+                        send_telegram(f"❌ Could not fetch price for {symbol}")
+                except Exception as e: 
+                    send_telegram(f"❌ Error: {e}")
+            else: 
+                send_telegram("❌ Usage: `/price SYMBOL`")
                 
-        elif text.startswith("/help"):
+        elif command == "/help":
             help_text = ("*Commands:*\n"
                          "`/alert SYMBOL PRICE` - Set alert\n"
                          "`/remove SYMBOL` - Remove alert\n"
