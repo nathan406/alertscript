@@ -1,10 +1,19 @@
 {
   "_meta": {
-    "XAUUSD": "2026-10-27T18:20:00+00:00",
+    "XAUUSD": "2026-10-27T19:30:00+00:00",
     "NDX": "2026-10-27T14:45:00+00:00"
   },
   "_session_taken": {
     "XAUUSD": "2026-10-26_NEW_YORK",
     "NDX": "2026-10-27_ASIAN"
+  },
+  "XAUUSD": {
+    "direction": "BUY",
+    "entry": 4062.063,
+    "sl": 4060.003,
+    "tp1": 4064.123,
+    "tp2": 4066.183,
+    "tp1_hit": false,
+    "sl_moved_to_be": false
   }
 }
