@@ -1,17 +1,3 @@
-# ==============================================================================
-# TELEGRAM PRICE ALERT BOT (MT5 / BIQUOTE)
-# ==============================================================================
-# Strictly handles custom price alerts via Telegram commands.
-# No buy/sell signals. Just pure price tracking using your broker's data.
-#
-# Commands:
-#   /alert SYMBOL PRICE  - Set an alert
-#   /remove SYMBOL       - Cancel an alert
-#   /alerts              - List active alerts
-#   /price SYMBOL        - Get the current MT5 price
-#   /help                - Show this menu
-# ==============================================================================
-
 import os
 import json
 import time
@@ -64,10 +50,8 @@ def save_price_alerts(a):
 # ------------------------------------------------------------- DATA FETCHING
 def fetch_biquote_series(symbol, interval_str, limit=100):
     if not BIQUOTE_AVAILABLE: raise RuntimeError("biquote not installed")
-    
     bq = Biquote()
     method = getattr(bq, "ohlc", None)
-    
     attempts = [
         lambda: method(symbol=symbol, interval=interval_str, limit=limit),
         lambda: method(symbol=symbol, interval=interval_str),
@@ -78,27 +62,19 @@ def fetch_biquote_series(symbol, interval_str, limit=100):
     for fn in attempts:
         try:
             result = fn(); break
-        except Exception as e: 
-            last_err = e
-            
-    if result is None: 
-        raise RuntimeError(f"biquote failed: {last_err}")
+        except Exception as e: last_err = e
+    if result is None: raise RuntimeError(f"biquote failed: {last_err}")
 
-    # Convert to DataFrame
-    if isinstance(result, pd.DataFrame): 
-        df = result.copy()
-    elif isinstance(result, list): 
-        df = pd.DataFrame(result)
+    if isinstance(result, pd.DataFrame): df = result.copy()
+    elif isinstance(result, list): df = pd.DataFrame(result)
     elif isinstance(result, dict):
         payload = result
         for k in ("data", "candles", "values", "result", "ohlc"):
             if k in payload and isinstance(payload[k], (list, dict)):
                 payload = payload[k]; break
         df = pd.DataFrame(payload)
-    else: 
-        raise RuntimeError("biquote: unexpected return type")
+    else: raise RuntimeError("biquote: unexpected return type")
 
-    # Standardize column names
     col_lower = {c.lower(): c for c in df.columns}
     rename_map = {}
     for tc in ["opentime", "open_time", "time", "timestamp", "datetime", "date", "t"]:
@@ -108,7 +84,6 @@ def fetch_biquote_series(symbol, interval_str, limit=100):
         if src in col_lower: rename_map[col_lower[src]] = dst
     df = df.rename(columns=rename_map)
 
-    # Timestamp conversion
     t = df["_t"]
     if pd.api.types.is_numeric_dtype(t):
         v = float(t.iloc[0]); unit = "ms" if v > 1e12 else "s"
@@ -117,12 +92,10 @@ def fetch_biquote_series(symbol, interval_str, limit=100):
         df["_t"] = pd.to_datetime(t, utc=True)
         
     df = df.set_index("_t").sort_index()
-    for c in ["Open", "High", "Low", "Close"]: 
-        df[c] = df[c].astype(float)
-        
+    for c in ["Open", "High", "Low", "Close"]: df[c] = df[c].astype(float)
     return df[["Open", "High", "Low", "Close"]].tail(limit)
 
-def drop_unclosed_candles(df, interval_str="5m"):
+def drop_unclosed_candles(df):
     if df.empty: return df
     idx = df.index if df.index.tz is not None else df.index.tz_localize("UTC")
     bar_len = pd.Timedelta(minutes=5)
@@ -136,8 +109,7 @@ def send_telegram(text):
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=5)
-    except Exception as e: 
-        print(f"Telegram Error: {e}")
+    except Exception: pass
 
 def send_notification(title, body):
     if DISCORD_WEBHOOK_URL:
@@ -153,8 +125,7 @@ def poll_telegram_commands():
         r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
                          params={"offset": offset, "timeout": 1}, timeout=10)
         data = r.json()
-    except Exception: 
-        return
+    except Exception: return
         
     if not data.get("ok"): return
 
@@ -166,9 +137,9 @@ def poll_telegram_commands():
         new_offset = max(new_offset, update_id + 1)
         msg = result.get("message", {})
         
-        # Ignore messages older than 60 mins to prevent replaying old commands
+        # 6-MINUTE HARD LOCK: Prevents GitHub Actions from re-reading old messages
         msg_time = msg.get("date", 0)
-        if (time.time() - msg_time) > 3600:
+        if (time.time() - msg_time) > 360:
             continue
 
         text = msg.get("text", "").strip()
@@ -187,8 +158,7 @@ def poll_telegram_commands():
                     send_telegram(f"✅ Price Alert Set\n\nAlert set for *{symbol}* at *{price}*")
                 except ValueError:
                     send_telegram("❌ Invalid price. Usage: `/alert XAUUSD 1445.50`")
-            else:
-                send_telegram("❌ Usage: `/alert SYMBOL PRICE`")
+            else: send_telegram("❌ Usage: `/alert SYMBOL PRICE`")
                 
         elif text.startswith("/remove"):
             parts = text.split()
@@ -198,17 +168,14 @@ def poll_telegram_commands():
                     del alerts[symbol]
                     updated = True
                     send_telegram(f"🗑 Alert Removed for *{symbol}*")
-                else:
-                    send_telegram(f"ℹ️ No active alert for *{symbol}*")
+                else: send_telegram(f"ℹ️ No active alert for *{symbol}*")
                     
         elif text.startswith("/alerts"):
             if alerts:
                 lines = ["*Active Price Alerts:*"]
-                for s, a in alerts.items():
-                    lines.append(f"• *{s}*: `{a['price']}`")
+                for s, a in alerts.items(): lines.append(f"• *{s}*: `{a['price']}`")
                 send_telegram("\n".join(lines))
-            else:
-                send_telegram("ℹ️ No active price alerts.")
+            else: send_telegram("ℹ️ No active price alerts.")
                 
         elif text.startswith("/price"):
             parts = text.split()
@@ -217,21 +184,17 @@ def poll_telegram_commands():
                 try:
                     df = fetch_biquote_series(symbol, "1m", limit=2)
                     if not df.empty:
-                        current_price = df.iloc[-1]["Close"]
-                        send_telegram(f"📊 *{symbol}* current price: `{current_price:.5f}`")
-                    else:
-                        send_telegram(f"❌ Could not fetch price for {symbol}")
-                except Exception as e:
-                    send_telegram(f"❌ Error: {e}")
-            else:
-                send_telegram("❌ Usage: `/price SYMBOL`")
+                        send_telegram(f"📊 *{symbol}* current price: `{df.iloc[-1]['Close']:.5f}`")
+                    else: send_telegram(f"❌ Could not fetch price for {symbol}")
+                except Exception as e: send_telegram(f"❌ Error: {e}")
+            else: send_telegram("❌ Usage: `/price SYMBOL`")
                 
         elif text.startswith("/help"):
             help_text = ("*Commands:*\n"
-                         "`/alert SYMBOL PRICE` - Set alert (e.g. `/alert XAUUSD 1445.50`)\n"
+                         "`/alert SYMBOL PRICE` - Set alert\n"
                          "`/remove SYMBOL` - Remove alert\n"
                          "`/alerts` - List active alerts\n"
-                         "`/price SYMBOL` - Check current MT5 price\n"
+                         "`/price SYMBOL` - Check MT5 price\n"
                          "`/help` - Show this message")
             send_telegram(help_text)
 
@@ -249,19 +212,14 @@ def check_price_alerts():
         if created_at.tzinfo is None: created_at = created_at.tz_localize("UTC")
 
         try:
-            # Fetch recent 5m candles
             df = fetch_biquote_series(symbol, "5m", limit=50)
             df = drop_unclosed_candles(df)
             if df.empty: continue
 
             hit_bar = None
-            # Check the last 20 closed candles
             for idx, row in df.iloc[-20:].iterrows():
                 bar_close_time = idx + pd.Timedelta(minutes=5)
-                
-                # We only care about candles that closed AFTER the alert was set
                 if bar_close_time > created_at:
-                    # If target is anywhere inside the candle's range, it was tapped
                     if float(row["Low"]) <= target <= float(row["High"]):
                         hit_bar = row
                         break
@@ -274,25 +232,15 @@ def check_price_alerts():
                 send_notification(f"🚨 Price Alert: {symbol}", msg)
                 del alerts[symbol]
                 updated = True
-        except Exception as e:
-            print(f"[PRICE ALERT] Error checking {symbol}: {e}")
+        except Exception as e: print(f"[PRICE ALERT] Error {symbol}: {e}")
 
     if updated: save_price_alerts(alerts)
 
 # ------------------------------------------------------------- MAIN
 def main():
-    print(f"\n===== SCAN START — {datetime.now(ZAMBIA_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')} =====")
-    
-    # 1. Read any new commands from Telegram
+    print(f"===== SCAN START — {datetime.now(ZAMBIA_TZ).strftime('%H:%M:%S')} =====")
     poll_telegram_commands()
-    
-    # 2. Check if any active alerts hit their target
     check_price_alerts()
-    
-    print("===== SCAN COMPLETE =====")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"Scanner Exception: {e}")
+    main()
