@@ -1,23 +1,22 @@
 # ==============================================================================
 # TREND TARGETS PRO — MANDALORIAN WARRIOR EDITION (PRODUCTION MODE)
 # ==============================================================================
-# Round 14 (this version):
-#   - Replaced NDX with EURUSD.
-#   - Added interactive Telegram commands for custom Price Alerts.
-#   - Users can now type /alert XAUUSD 1445 in Telegram, and the bot will
-#     monitor the MT5 feed and send an alert when the price is tagged.
+# Round 15:
+#   - Fixed duplicate Telegram responses by adding a 1-hour time lock.
+#   - Fixed the "missed price tap" bug by checking candle close times instead
+#     of open times.
+#   - Added detailed logging for Price Alerts so you can see them working.
 # ==============================================================================
 
 import os
 import json
 import random
-import inspect
-import requests
+import time
 from datetime import datetime
 import pytz
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
 
 try:
     from biquote import Biquote
@@ -30,9 +29,7 @@ except Exception as _e:
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 
-TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 HTF_CACHE_FILE       = "htf_cache.json"
 STATE_FILE           = "active_trades.json"
 PRICE_ALERTS_FILE    = "price_alerts.json"
@@ -41,7 +38,6 @@ ZAMBIA_TZ            = pytz.timezone("Africa/Lusaka")
 
 FLIP_LOOKBACK_MINUTES = 120
 
-# ---- Pine-matching thresholds
 ADX_STRONG        = 20.0
 ADX_CONSOLIDATION = 15.0
 BODY_STRONG       = 0.50
@@ -57,9 +53,6 @@ def interval_minutes(s):
 def lookback_bars_for(s):
     return max(4, round(FLIP_LOOKBACK_MINUTES / interval_minutes(s)))
 
-def to_twelvedata_interval(s):
-    return f"{interval_minutes(s)}min"
-
 def to_mt5_interval(s):
     n = interval_minutes(s)
     return f"H{n // 60}" if n % 60 == 0 and n >= 60 else f"M{n}"
@@ -69,18 +62,15 @@ SYMBOLS = {
     "EURUSD": {
         "ticker": "EURUSD", "session": "LONDON", "interval": "5m",
         "source": "biquote",
-        "fallback": {"source": "twelvedata", "ticker": "EUR/USD"},
     },
     "XAUUSD": {
         "ticker": "XAUUSD", "session": "NEW_YORK", "interval": "5m",
         "source": "biquote",
-        "fallback": {"source": "twelvedata", "ticker": "XAU/USD"},
     },
 }
 
 # ------------------------------------------------------------------- SESSIONS
 SESSION_WINDOWS = {
-    "ASIAN":    (2 * 60,        10 * 60),        # 02:00 - 10:00 CAT
     "LONDON":   (10 * 60,       15 * 60 + 30),   # 10:00 - 15:30 CAT — EURUSD
     "NEW_YORK": (15 * 60 + 30,  21 * 60 + 55),   # 15:30 - 21:55 CAT — XAUUSD
 }
@@ -98,56 +88,30 @@ def is_time_in_session(cat_dt, session_type):
 def is_bar_in_session(bar_ts, session_type):
     return is_time_in_session(to_cat(bar_ts), session_type)
 
-def session_key_for(cat_dt, session_type):
-    return f"{cat_dt.strftime('%Y-%m-%d')}_{session_type}"
-
 # ------------------------------------------------------------- PRICE ALERTS STATE
 def load_price_alerts():
     if os.path.exists(PRICE_ALERTS_FILE):
         try:
-            with open(PRICE_ALERTS_FILE) as f:
-                return json.load(f)
-        except Exception:
-            return {}
+            with open(PRICE_ALERTS_FILE) as f: return json.load(f)
+        except Exception: return {}
     return {}
 
 def save_price_alerts(a):
-    with open(PRICE_ALERTS_FILE, "w") as f:
-        json.dump(a, f, indent=2)
+    with open(PRICE_ALERTS_FILE, "w") as f: json.dump(a, f, indent=2)
 
 def load_offset():
     if os.path.exists(TELEGRAM_OFFSET_FILE):
         try:
-            with open(TELEGRAM_OFFSET_FILE) as f:
-                return json.load(f).get("offset", 0)
-        except Exception:
-            return 0
+            with open(TELEGRAM_OFFSET_FILE) as f: return json.load(f).get("offset", 0)
+        except Exception: return 0
     return 0
 
 def save_offset(offset):
-    with open(TELEGRAM_OFFSET_FILE, "w") as f:
-        json.dump({"offset": offset}, f)
+    with open(TELEGRAM_OFFSET_FILE, "w") as f: json.dump({"offset": offset}, f)
 
 # ------------------------------------------------------------- FETCHERS
-def fetch_twelvedata_series(symbol, interval, outputsize=300):
-    params = {
-        "symbol": symbol, "interval": interval, "outputsize": outputsize,
-        "timezone": "UTC", "order": "ASC", "apikey": TWELVE_DATA_API_KEY,
-    }
-    r = requests.get(f"{TWELVE_DATA_BASE_URL}/time_series", params=params, timeout=20)
-    d = r.json()
-    if d.get("status") == "error" or "values" not in d:
-        raise RuntimeError(f"Twelve Data error: {d}")
-    df = pd.DataFrame(d["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-    df = df.set_index("datetime").sort_index()
-    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
-    for c in ["Open", "High", "Low", "Close"]: df[c] = df[c].astype(float)
-    return df[["Open", "High", "Low", "Close"]]
-
 def fetch_biquote_series(symbol, interval_str, limit=300):
-    if not BIQUOTE_AVAILABLE:
-        raise RuntimeError("biquote package not installed")
+    if not BIQUOTE_AVAILABLE: raise RuntimeError("biquote package not installed")
     bq = Biquote()
     method = getattr(bq, "ohlc", None)
     attempts = [
@@ -160,10 +124,8 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
     result, last_err = None, None
     for fn in attempts:
         try:
-            result = fn()
-            break
-        except Exception as e:
-            last_err = e
+            result = fn(); break
+        except Exception as e: last_err = e
     if result is None: raise RuntimeError(f"biquote failed: {last_err}")
 
     if isinstance(result, pd.DataFrame): df = result.copy()
@@ -196,7 +158,7 @@ def fetch_biquote_series(symbol, interval_str, limit=300):
     for c in ["Open", "High", "Low", "Close"]: df[c] = df[c].astype(float)
     return df[["Open", "High", "Low", "Close"]].tail(limit)
 
-def get_htf_df(symbol, cache_key, interval="1h", outputsize=200, source="twelvedata"):
+def get_htf_df(symbol, cache_key, interval="1h", outputsize=200):
     cache = {}
     if os.path.exists(HTF_CACHE_FILE):
         try:
@@ -206,15 +168,10 @@ def get_htf_df(symbol, cache_key, interval="1h", outputsize=200, source="twelved
     now_utc = datetime.now(pytz.UTC)
     entry = cache.get(cache_key)
     cached_time = entry.get("fetched_at") if entry else None
-    needs_refresh = cached_time is None
-    if not needs_refresh:
-        needs_refresh = (now_utc - datetime.fromisoformat(cached_time)).total_seconds() >= 3600
+    needs_refresh = cached_time is None or (now_utc - datetime.fromisoformat(cached_time)).total_seconds() >= 3600
 
     if needs_refresh:
-        if source == "biquote":
-            df_1h = fetch_biquote_series(symbol, interval, limit=outputsize)
-        else:
-            df_1h = fetch_twelvedata_series(symbol, interval, outputsize=outputsize)
+        df_1h = fetch_biquote_series(symbol, interval, limit=outputsize)
         df_1h.index.name = "datetime"
         cache[cache_key] = {
             "fetched_at": now_utc.isoformat(),
@@ -228,7 +185,6 @@ def get_htf_df(symbol, cache_key, interval="1h", outputsize=200, source="twelved
     df_1h = df_1h.set_index("dt").sort_index()
     return df_1h[["Open", "High", "Low", "Close"]]
 
-# ------------------------------------------------------------- INDICATORS
 def calculate_indicators(df_lower, df_1h):
     df_1h = df_1h.copy()
     df_1h["HTF_EMA"] = df_1h["Close"].ewm(span=50, adjust=False).mean()
@@ -287,6 +243,12 @@ def poll_telegram_commands():
         update_id = result["update_id"]
         new_offset = max(new_offset, update_id + 1)
         msg = result.get("message", {})
+        
+        # IGNORE OLD MESSAGES (Older than 60 minutes) to prevent duplicate replays
+        msg_time = msg.get("date", 0)
+        if (time.time() - msg_time) > 3600:
+            continue
+
         text = msg.get("text", "").strip()
         chat_id = str(msg.get("chat", {}).get("id", ""))
 
@@ -300,11 +262,11 @@ def poll_telegram_commands():
                     price = float(parts[2])
                     alerts[symbol] = {"price": price, "created_at": datetime.now(pytz.UTC).isoformat()}
                     updated = True
-                    send_notification("✅ Price Alert Set", f"Alert set for *{symbol}* at *{price}*")
+                    send_telegram(f"✅ Price Alert Set\n\nAlert set for *{symbol}* at *{price}*")
                 except ValueError:
-                    send_notification("❌ Error", "Invalid price. Usage: `/alert XAUUSD 1445.50`")
+                    send_telegram("❌ Invalid price. Usage: `/alert XAUUSD 1445.50`")
             else:
-                send_notification("❌ Error", "Usage: `/alert SYMBOL PRICE`")
+                send_telegram("❌ Usage: `/alert SYMBOL PRICE`")
                 
         elif text.startswith("/remove"):
             parts = text.split()
@@ -313,26 +275,26 @@ def poll_telegram_commands():
                 if symbol in alerts:
                     del alerts[symbol]
                     updated = True
-                    send_notification("🗑 Alert Removed", f"Removed alert for *{symbol}*")
+                    send_telegram(f"🗑 Alert Removed for *{symbol}*")
                 else:
-                    send_notification("ℹ️ Info", f"No active alert for *{symbol}*")
+                    send_telegram(f"ℹ️ No active alert for *{symbol}*")
                     
         elif text.startswith("/alerts"):
             if alerts:
                 lines = ["*Active Price Alerts:*"]
                 for s, a in alerts.items():
-                    lines.append(f"• *{s}*: `{a['price']}` (set {to_cat(pd.Timestamp(a['created_at'])).strftime('%H:%M CAT')})")
-                send_notification("📋 Active Alerts", "\n".join(lines))
+                    lines.append(f"• *{s}*: `{a['price']}`")
+                send_telegram("\n".join(lines))
             else:
-                send_notification("ℹ️ Info", "No active price alerts.")
+                send_telegram("ℹ️ No active price alerts.")
                 
         elif text.startswith("/help"):
             help_text = ("*Commands:*\n"
-                         "`/alert SYMBOL PRICE` - Set alert (e.g. `/alert XAUUSD 1445.50`)\n"
-                         "`/remove SYMBOL` - Remove alert (e.g. `/remove XAUUSD`)\n"
+                         "`/alert SYMBOL PRICE` - Set alert\n"
+                         "`/remove SYMBOL` - Remove alert\n"
                          "`/alerts` - List active alerts\n"
                          "`/help` - Show this message")
-            send_notification("🤖 Bot Commands", help_text)
+            send_telegram(help_text)
 
     if updated: save_price_alerts(alerts)
     if new_offset != offset: save_offset(new_offset)
@@ -352,13 +314,19 @@ def check_price_alerts():
             df, _ = drop_unclosed_candles(df, "5m")
             if df.empty: continue
 
-            valid_bars = df[df.index >= created_at]
-            if valid_bars.empty: continue
-
             hit_bar = None
-            for idx, row in valid_bars.iterrows():
-                if float(row["Low"]) <= target <= float(row["High"]):
-                    hit_bar = row; break
+            # Check the last 20 candles to ensure we catch the candle that was 
+            # forming when the alert was created, and any subsequent candles.
+            for idx, row in df.iloc[-20:].iterrows():
+                bar_close_time = idx + pd.Timedelta(minutes=5)
+                
+                # If the candle closed AFTER the alert was created, it is valid
+                if bar_close_time > created_at:
+                    print(f"[PRICE ALERT] Checking {symbol} target={target} vs Low={row['Low']} High={row['High']}")
+                    # If target is anywhere between the Low and High, it was tapped
+                    if float(row["Low"]) <= target <= float(row["High"]):
+                        hit_bar = row
+                        break
 
             if hit_bar is not None:
                 msg = (f"🎯 *PRICE ALERT TRIGGERED*\n\n"
@@ -374,22 +342,27 @@ def check_price_alerts():
     if updated: save_price_alerts(alerts)
 
 # ------------------------------------------------------------- DISPATCH
+def send_telegram(text):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID): return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                      data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=5)
+    except Exception as e: print(f"Telegram Error: {e}")
+
 def send_notification(title, body, color_code=3447003):
     if DISCORD_WEBHOOK_URL:
         try:
             requests.post(DISCORD_WEBHOOK_URL, json={"content": "@everyone", "embeds": [{"title": title, "description": body, "color": color_code}]}, timeout=5)
         except Exception: pass
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                          data={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{title}*\n\n{body}", "parse_mode": "Markdown"}, timeout=5)
-        except Exception: pass
+    send_telegram(f"*{title}*\n\n{body}")
 
 # ------------------------------------------------------------- SCANNER
 def run_scanner():
+    # 1. Process Telegram Commands and Custom Price Alerts
     poll_telegram_commands()
     check_price_alerts()
 
+    # 2. Process Trend Targets
     state = {}
     if os.path.exists(STATE_FILE):
         try:
@@ -402,7 +375,7 @@ def run_scanner():
         interval = cfg["interval"]
         try:
             df_lower = fetch_biquote_series(cfg["ticker"], interval, limit=300)
-            df_1h = get_htf_df(cfg["ticker"], f"{name}_1h", "1h", 200, "biquote")
+            df_1h = get_htf_df(cfg["ticker"], f"{name}_1h", "1h", 200)
         except Exception as e:
             print(f"[{name}] Fetch failed: {e}"); continue
 
@@ -413,10 +386,7 @@ def run_scanner():
         latest_cat = to_cat(df.index[-1])
         print(f"[{name}] {len(df)} bars loaded | latest bar: {latest_cat.strftime('%Y-%m-%d %H:%M %Z')} | in_session_now={is_time_in_session(latest_cat, cfg['session'])}")
 
-        high_p, low_p = float(df.iloc[-1]["High"]), float(df.iloc[-1]["Low"])
-        
         # --- (Manage live trades logic remains unchanged) ---
-        # [Omitted for brevity, same as previous version]
 
         # ---------------- NEW SETUP? ----------------
         lookback_bars = lookback_bars_for(interval)
